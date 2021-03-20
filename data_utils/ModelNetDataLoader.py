@@ -62,9 +62,9 @@ class ModelNetDataLoader(Dataset):
 
         self.cache_size = cache_size  # how many data points to cache in memory
         self.cache = {}  # from index to (point_set, cls) tuple
-        
-        with open('ModelNet40_normal_resampled_' + split + '.pkl', 'rb') as handle:
-                self.all_data = pickle.load(handle)
+
+        # with open('ModelNet40_normal_resampled_' + split + '.pkl', 'rb') as handle:
+        #         self.all_data = pickle.load(handle)
 
     def __len__(self):
         return len(self.datapath)
@@ -76,7 +76,8 @@ class ModelNetDataLoader(Dataset):
             fn = self.datapath[index]
             cls = self.classes[self.datapath[index][0]]
             cls = np.array([cls]).astype(np.int32)
-            point_set = self.all_data[fn[1]]
+            point_set = np.loadtxt(fn[1], delimiter=',').astype(np.float32)
+            # point_set = self.all_data[fn[1]]
             if self.uniform:
                 point_set = farthest_point_sample(point_set, self.npoints)
             else:

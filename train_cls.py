@@ -24,8 +24,8 @@ sys.path.append(os.path.join(ROOT_DIR, 'models'))
 def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('PointNet')
-    parser.add_argument('--batch_size', type=int, default=24, help='batch size in training [default: 24]')
-    parser.add_argument('--model', default='pointnet_cls', help='model name [default: pointnet_cls]')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size in training [default: 24]')
+    parser.add_argument('--model', default='pct_cls_ssg', help='model name [default: pointnet_cls]')
     parser.add_argument('--epoch',  default=200, type=int, help='number of epoch in training [default: 200]')
     parser.add_argument('--pretrain', action='store_true', default=False, help='whether to load a pretrained model [default: False]')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='learning rate in training [default: 0.001]')
@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument('--log_dir', type=str, default=None, help='experiment root')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='decay rate [default: 1e-4]')
     parser.add_argument('--normal', action='store_true', default=False, help='Whether to use normal information [default: False]')
-    parser.add_argument('--num_worker', type=int, default=4, help='dataloader threads')
+    parser.add_argument('--num_worker', type=int, default=8, help='dataloader threads')
     return parser.parse_args()
 
 def test(model, loader, num_class=40):
@@ -99,7 +99,7 @@ def main(args):
 
     '''DATA LOADING'''
     log_string('Load dataset ...')
-    DATA_PATH = 'data/modelnet40_normal_resampled/'
+    DATA_PATH = './data/modelnet40_normal_resampled/'
 
     TRAIN_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='train',
                                                      normal_channel=args.normal)
@@ -137,9 +137,13 @@ def main(args):
             weight_decay=args.decay_rate
         )
     else:
-        optimizer = torch.optim.SGD(classifier.parameters(), lr=0.01, momentum=0.9)
+        optimizer = torch.optim.SGD(classifier.parameters(), \
+                                    lr=0.01, momentum=0.9,\
+                                    weight_decay=args.decay_rate)
 
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+    # Use MultiStepLR as in paper, decay by 10 at [120, 160]
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[120, 160], gamma=0.7)
     global_epoch = 0
     global_step = 0
     best_instance_acc = 0.0
@@ -156,8 +160,8 @@ def main(args):
             points, target = data
             points = points.data.numpy()
             points = provider.random_point_dropout(points)
-            points[:,:, 0:3] = provider.random_scale_point_cloud(points[:,:, 0:3])
-            points[:,:, 0:3] = provider.shift_point_cloud(points[:,:, 0:3])
+            # points[:,:, 0:3] = provider.random_scale_point_cloud(points[:,:, 0:3])
+            # points[:,:, 0:3] = provider.shift_point_cloud(points[:,:, 0:3])
             points = torch.Tensor(points)
             target = target[:, 0]
 
@@ -178,32 +182,33 @@ def main(args):
         train_instance_acc = np.mean(mean_correct)
         log_string('Train Instance Accuracy: %f' % train_instance_acc)
 
+        if epoch % 5 == 0:
 
-        with torch.no_grad():
-            instance_acc, class_acc = test(classifier.eval(), testDataLoader)
+            with torch.no_grad():
+                instance_acc, class_acc = test(classifier.eval(), testDataLoader)
 
-            if (instance_acc >= best_instance_acc):
-                best_instance_acc = instance_acc
-                best_epoch = epoch + 1
+                if (instance_acc >= best_instance_acc):
+                    best_instance_acc = instance_acc
+                    best_epoch = epoch + 1
 
-            if (class_acc >= best_class_acc):
-                best_class_acc = class_acc
-            log_string('Test Instance Accuracy: %f, Class Accuracy: %f'% (instance_acc, class_acc))
-            log_string('Best Instance Accuracy: %f, Class Accuracy: %f'% (best_instance_acc, best_class_acc))
+                if (class_acc >= best_class_acc):
+                    best_class_acc = class_acc
+                log_string('Test Instance Accuracy: %f, Class Accuracy: %f'% (instance_acc, class_acc))
+                log_string('Best Instance Accuracy: %f, Class Accuracy: %f'% (best_instance_acc, best_class_acc))
 
-            if (instance_acc >= best_instance_acc):
-                logger.info('Save model...')
-                savepath = str(checkpoints_dir) + '/best_model.pth'
-                log_string('Saving at %s'% savepath)
-                state = {
-                    'epoch': best_epoch,
-                    'instance_acc': instance_acc,
-                    'class_acc': class_acc,
-                    'model_state_dict': classifier.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }
-                torch.save(state, savepath)
-            global_epoch += 1
+                if (instance_acc >= best_instance_acc):
+                    logger.info('Save model...')
+                    savepath = str(checkpoints_dir) + '/best_model.pth'
+                    log_string('Saving at %s'% savepath)
+                    state = {
+                        'epoch': best_epoch,
+                        'instance_acc': instance_acc,
+                        'class_acc': class_acc,
+                        'model_state_dict': classifier.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    }
+                    torch.save(state, savepath)
+        global_epoch += 1
 
     logger.info('End of training...')
 

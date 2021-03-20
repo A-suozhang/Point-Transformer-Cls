@@ -2,7 +2,6 @@
 #include "group_points.h"
 #include "interpolate.h"
 #include "sampling.h"
-#include "ball_query_individual.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gather_points", &gather_points);
@@ -14,7 +13,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("three_interpolate_grad", &three_interpolate_grad);
 
   m.def("ball_query", &ball_query);
-  m.def("ball_query_individual", &ball_query_individual);
 
   m.def("group_points", &group_points);
   m.def("group_points_grad", &group_points_grad);
