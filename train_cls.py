@@ -115,6 +115,7 @@ def main(args):
     classifier = MODEL.get_model(num_class,normal_channel=args.normal, N=1024).cuda()
     criterion = MODEL.get_loss().cuda()
 
+
     try:
         if args.pretrain:
             checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
@@ -182,7 +183,7 @@ def main(args):
         train_instance_acc = np.mean(mean_correct)
         log_string('Train Instance Accuracy: %f' % train_instance_acc)
 
-        if epoch % 5 == 0:
+        if epoch % 1 == 0:
 
             with torch.no_grad():
                 instance_acc, class_acc = test(classifier.eval(), testDataLoader)

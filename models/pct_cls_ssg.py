@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from pct_utils import TDLayer, PTBlock
+from pct_utils import TDLayer, PTBlock, stem_knn
+
 
 
 class get_model(nn.Module):
@@ -9,12 +10,12 @@ class get_model(nn.Module):
         in_channel = 6 if normal_channel else 3
         self.normal_channel = normal_channel
         self.input_mlp = nn.Sequential(
-            nn.Conv1d(in_channel, 16, 1), 
-            nn.BatchNorm1d(16), 
+            nn.Conv1d(in_channel, 32, 1), 
+            nn.BatchNorm1d(32), 
             nn.ReLU(), 
-            nn.Conv1d(16, 32, 1), 
+            nn.Conv1d(32, 32, 1),
             nn.BatchNorm1d(32))
-        self.TDLayer0 = TDLayer(npoint=N, input_dim=in_channel, out_dim=32, k=16)
+        # self.TDLayer0 = TDLayer(npoint=N, input_dim=in_channel, out_dim=32, k=16)
         self.PTBlock0 = PTBlock(in_dim=32)
 
         self.TDLayer1 = TDLayer(npoint=int(N/4),input_dim=32, out_dim=64, k=16)
@@ -35,17 +36,24 @@ class get_model(nn.Module):
         self.drop1 = nn.Dropout(0.4)
         self.fc2 = nn.Linear(256, num_class)
 
+
     def forward(self, inputs):
         B,_,_ = list(inputs.size())
 
-        
         if self.normal_channel:
             l0_xyz = inputs[:, :3, :]
         else:
             l0_xyz = inputs
-        l0_xyz, l0_points, l0_xyz_local, l0_points_local = self.TDLayer0(l0_xyz, inputs)
-        l0_points = self.PTBlock0(l0_xyz, l0_points, l0_xyz_local, l0_points_local)
-        
+
+        input_points = self.input_mlp(inputs)
+        # knn_xyz, knn_points = stem_knn(l0_xyz, input_points, k=16)
+
+        # l0_xyz, l0_points, l0_xyz_local, l0_points_local = self.TDLayer0(l0_xyz, inputs)
+        # l0_points = self.PTBlock0(l0_xyz, l0_points, l0_xyz_local, l0_points_local)
+        # l0_points = self.PTBlock0(l0_xyz, input_points, knn_xyz, knn_points)
+
+        l0_points = self.PTBlock0(l0_xyz, input_points, l0_xyz, input_points)
+
         l1_xyz, l1_points, l1_xyz_local, l1_points_local = self.TDLayer1(l0_xyz, l0_points)
         l1_points = self.PTBlock1(l1_xyz, l1_points, l1_xyz_local, l1_points_local)
 
@@ -66,9 +74,7 @@ class get_model(nn.Module):
         x = self.fc2(x)
         x = F.log_softmax(x, -1)
 
-
         return x, l4_points
-
 
 
 class get_loss(nn.Module):
