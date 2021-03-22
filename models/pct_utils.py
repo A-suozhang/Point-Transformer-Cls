@@ -240,45 +240,63 @@ class PTBlock(nn.Module):
 
         self.in_dim = in_dim
         self.is_firstlayer = is_firstlayer
-        # ??: what is the hidden_dim
-        # self.hidden_dim = int(in_dim/2)
+
+        # TODO: set the hidden/vector/out_dims
         self.hidden_dim = in_dim
+        self.out_dim = in_dim
+        self.vector_dim = in_dim
         self.n_sample = n_sample
 
+        # whether use BN
+        self.use_bn = True
+        self.use_ln = False
+
         self.linear_top = nn.Sequential(
-            nn.Conv1d(in_dim, self.hidden_dim, 1), 
-            nn.BatchNorm1d(self.hidden_dim))
+            nn.Conv1d(in_dim, self.hidden_dim, 1),
+            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+        )
         self.linear_down = nn.Sequential(
-            nn.Conv1d(self.hidden_dim, self.in_dim, 1), 
-            nn.BatchNorm1d(self.in_dim))
+            nn.Conv1d(self.out_dim, self.in_dim, 1),
+            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
+        )
 
         self.phi = nn.Sequential(
-            nn.Conv1d(self.hidden_dim, self.hidden_dim, 1), 
-            nn.BatchNorm1d(self.hidden_dim))
+            nn.Conv1d(self.hidden_dim, self.out_dim, 1),
+            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+        )
         self.psi = nn.Sequential(
-            nn.Conv1d(self.hidden_dim, self.hidden_dim, 1),
-            nn.BatchNorm1d(self.hidden_dim))
+            nn.Conv1d(self.hidden_dim, self.out_dim, 1),
+            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+        )
         self.alpha = nn.Sequential(
-            nn.Conv1d(self.hidden_dim, self.hidden_dim, 1), 
-            nn.BatchNorm1d(self.hidden_dim))
+            nn.Conv1d(self.hidden_dim, self.out_dim, 1),
+            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+        )
 
         self.gamma = nn.Sequential(
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            nn.BatchNorm2d(self.hidden_dim), 
-            nn.ReLU(), 
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            nn.BatchNorm2d(self.hidden_dim))
+            nn.Conv2d(self.out_dim, self.hidden_dim, 1),
+            nn.BatchNorm2d(self.hidden_dim) if self.use_bn else nn.Identity(),
+            nn.ReLU(),
+            nn.Conv2d(self.hidden_dim, self.vector_dim, 1),
+            nn.BatchNorm2d(self.vector_dim) if self.use_bn else nn.Identity()
+        )
+
         self.delta = nn.Sequential(
-            nn.Conv2d(3, self.hidden_dim, 1), 
-            nn.BatchNorm2d(self.hidden_dim), 
-            nn.ReLU(), 
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            nn.BatchNorm2d(self.hidden_dim)
+            nn.Conv2d(3, self.hidden_dim, 1),
+            nn.BatchNorm2d(self.hidden_dim) if self.use_bn else nn.Identity(),
+            nn.ReLU(),
+            nn.Conv2d(self.hidden_dim, self.out_dim, 1),
+            nn.BatchNorm2d(self.out_dim) if self.use_bn else nn.Identity()
             )
+
+        if self.use_ln:
+            self.ln_top = nn.LayerNorm(self.in_dim)
+            self.ln_attn = nn.LayerNorm(self.hidden_dim)
+            self.ln_down = nn.LayerNorm(self.out_dim)
 
         self.knn = KNN(k=n_sample, transpose_mode=True)
 
-    def forward(self, input_p, input_x, a, b):
+    def forward(self, input_p, input_x):
         '''
         input_p:  B, 3, npoint
         input_x: B, in_dim, npoint
@@ -302,7 +320,16 @@ class PTBlock(nn.Module):
 
         grouped_input_p = grouping_operation_cuda(input_p.transpose(1,2).contiguous(), idx) # [bs, xyz, npoint, k]
 
+        if self.use_ln:
+            input_x = self.ln_top(input_x.transpose(1,2)).transpose(1,2)
+
         input_x = self.linear_top(input_x)
+
+        # TODO: apply the layer-norm
+        # however the original is [bs, dim, npoints]
+        if self.use_ln:
+            input_x = self.ln_attn(input_x.transpose(1,2)).transpose(1,2)
+
         # grouped_input_x = index_points(input_x.permute([0,2,1]), idx.long()).permute([0,3,1,2])
         # grouped_input_x = grouping_operation_cuda(input_x.contiguous(), idx)  # [bs, xyz, npoint, K]
         phi = self.phi(input_x)
@@ -313,10 +340,19 @@ class PTBlock(nn.Module):
         relative_xyz = input_p.permute([0,2,1])[:,:,:,None] - grouped_input_p
         pos_encoding = self.delta(relative_xyz)    # [bs, dims, npoint, k]
 
-        y = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)*(alpha + pos_encoding)
+        attn_map = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)
+
+        # y = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)*(alpha + pos_encoding)
+
+        # the attn_map: [vector_dim];
+        # the alpha:    [out_dim]
+        y = attn_map.repeat(1, self.out_dim // self.vector_dim,1,1)*(alpha + pos_encoding)
         y = y.sum(dim=-1)
+
+        if self.use_ln:
+            y = self.ln_down(y.transpose(1,2)).transpose(1,2)
 
         y = self.linear_down(y)
 
-        return y+res
+        return y+res, attn_map.detach().cpu().data
 

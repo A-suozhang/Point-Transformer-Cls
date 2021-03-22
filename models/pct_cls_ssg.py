@@ -15,6 +15,7 @@ class get_model(nn.Module):
             nn.ReLU(), 
             nn.Conv1d(32, 32, 1),
             nn.BatchNorm1d(32))
+
         # self.TDLayer0 = TDLayer(npoint=N, input_dim=in_channel, out_dim=32, k=16)
         self.PTBlock0 = PTBlock(in_dim=32)
 
@@ -36,6 +37,26 @@ class get_model(nn.Module):
         self.drop1 = nn.Dropout(0.4)
         self.fc2 = nn.Linear(256, num_class)
 
+        self.use_ln = False
+        if self.use_ln:
+            self.final_ln = nn.LayerNorm(256)
+        self.use_layer_norm = True
+
+        self.save_flag = False
+        self.save_dict = {}
+        for i in range(5):
+            self.save_dict['attn_{}'.format(i)] = []
+
+
+
+    def save_intermediate(self):
+
+        save_dict = self.save_dict
+        self.save_dict = {}
+        for i in range(5):
+            self.save_dict['attn_{}'.format(i)] = []
+        return save_dict
+
 
     def forward(self, inputs):
         B,_,_ = list(inputs.size())
@@ -46,31 +67,35 @@ class get_model(nn.Module):
             l0_xyz = inputs
 
         input_points = self.input_mlp(inputs)
-        # knn_xyz, knn_points = stem_knn(l0_xyz, input_points, k=16)
-
-        # l0_xyz, l0_points, l0_xyz_local, l0_points_local = self.TDLayer0(l0_xyz, inputs)
-        # l0_points = self.PTBlock0(l0_xyz, l0_points, l0_xyz_local, l0_points_local)
-        # l0_points = self.PTBlock0(l0_xyz, input_points, knn_xyz, knn_points)
-
-        l0_points = self.PTBlock0(l0_xyz, input_points, l0_xyz, input_points)
+        l0_points, attn_0 = self.PTBlock0(l0_xyz, input_points)
 
         l1_xyz, l1_points, l1_xyz_local, l1_points_local = self.TDLayer1(l0_xyz, l0_points)
-        l1_points = self.PTBlock1(l1_xyz, l1_points, l1_xyz_local, l1_points_local)
+        l1_points, attn_1 = self.PTBlock1(l1_xyz, l1_points)
 
         l2_xyz, l2_points, l2_xyz_local, l2_points_local = self.TDLayer2(l1_xyz, l1_points)
-        l2_points = self.PTBlock2(l2_xyz, l2_points, l2_xyz_local, l2_points_local)
+        l2_points, attn_2 = self.PTBlock2(l2_xyz, l2_points)
 
         l3_xyz, l3_points, l3_xyz_local, l3_points_local = self.TDLayer3(l2_xyz, l2_points)
-        l3_points = self.PTBlock3(l3_xyz, l3_points, l3_xyz_local, l3_points_local)
+        l3_points, attn_3 = self.PTBlock3(l3_xyz, l3_points)
 
         l4_xyz, l4_points, l4_xyz_local, l4_points_local = self.TDLayer4(l3_xyz, l3_points)
-        l4_points = self.PTBlock4(l4_xyz, l4_points, l4_xyz_local, l4_points_local)
+        l4_points, attn_4 = self.PTBlock4(l4_xyz, l4_points)
+
+        if self.save_flag:
+            self.save_dict['attn_0'].append(attn_0)
+            self.save_dict['attn_1'].append(attn_1)
+            self.save_dict['attn_2'].append(attn_2)
+            self.save_dict['attn_3'].append(attn_3)
+            self.save_dict['attn_4'].append(attn_4)
 
         l4_points = l4_points.mean(dim=-1)
 
         x = l4_points.view(B, -1)
         x = self.drop1(F.relu(self.bn1(self.fc1(x))))
-        #x = self.drop2(F.relu(self.bn2(self.fc2(x))))
+        # apply the final LN for pre-LN scheme
+        if self.use_ln:
+            x = self.final_ln(x)
+
         x = self.fc2(x)
         x = F.log_softmax(x, -1)
 

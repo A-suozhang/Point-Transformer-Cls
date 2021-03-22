@@ -112,9 +112,9 @@ def main(args):
     num_class = 40
     MODEL = importlib.import_module(args.model)
     shutil.copy('./models/%s.py' % args.model, str(experiment_dir))
+    shutil.copy('./models/pct_utils.py', str(experiment_dir))
     classifier = MODEL.get_model(num_class,normal_channel=args.normal, N=1024).cuda()
     criterion = MODEL.get_loss().cuda()
-
 
     try:
         if args.pretrain:
@@ -169,6 +169,25 @@ def main(args):
             points = points.transpose(2, 1)
             points, target = points.cuda(), target.cuda()
             optimizer.zero_grad()
+
+            # TODO: save the intermediate results
+            SAVE_INTERVAL = 50
+            NUM_PER_EPOCH = 1
+
+            if (epoch+1) % SAVE_INTERVAL == 0:
+                if batch_id < NUM_PER_EPOCH:
+                    classifier.save_flag = True
+                elif batch_id == NUM_PER_EPOCH:
+                    intermediate_dict = classifier.save_intermediate()
+                    intermediate_path = os.path.join(experiment_dir, "attn")
+                    if not os.path.exists(intermediate_path):
+                        os.mkdir(intermediate_path)
+                    torch.save(intermediate_dict, os.path.join(intermediate_path, "epoch_{}".format(epoch)))
+                    log_string('Saved Intermediate at {}'.format(epoch))
+                else:
+                    classifier.save_flag = False
+            else:
+                classifier.save_flag = False
 
             classifier = classifier.train()
             pred, trans_feat = classifier(points)
