@@ -133,84 +133,6 @@ class TDLayer(nn.Module):
         #print(new_points_pooled.size())
         return new_xyz, new_points_pooled, grouped_xyz_norm, new_points
 
-# class PTBlock(nn.Module):
-    # def __init__(self, in_dim, is_firstlayer=False):
-        # super().__init__()
-        # '''
-        # Point Transformer Layer
-
-        # in_dim: feature dimension of the input feature x
-        # out_dim: feature dimension of the Point Transformer Layer
-        # '''
-
-
-        # self.in_dim = in_dim
-        # self.is_firstlayer = is_firstlayer
-        # # self.hidden_dim = int(in_dim/2)
-        # self.hidden_dim = in_dim
-
-        # self.linear_top = nn.Sequential(
-            # nn.Conv1d(in_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm1d(self.hidden_dim))
-        # self.linear_down = nn.Sequential(
-            # nn.Conv1d(self.hidden_dim, self.in_dim, 1), 
-            # nn.BatchNorm1d(self.in_dim))
-
-        # self.phi = nn.Sequential(
-            # nn.Conv1d(self.hidden_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm1d(self.hidden_dim))
-        # self.psi = nn.Sequential(
-            # nn.Conv2d(self.in_dim, self.hidden_dim, 1),
-            # nn.BatchNorm2d(self.hidden_dim))
-        # self.alpha = nn.Sequential(
-            # nn.Conv2d(self.in_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm2d(self.hidden_dim))
-
-        # self.gamma = nn.Sequential(
-            # nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm2d(self.hidden_dim), 
-            # nn.ReLU(), 
-            # nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm2d(self.hidden_dim))
-        # self.delta = nn.Sequential(
-            # nn.Conv2d(3, self.hidden_dim, 1), 
-            # nn.BatchNorm2d(self.hidden_dim), 
-            # nn.ReLU(), 
-            # nn.Conv2d(self.hidden_dim, self.hidden_dim, 1), 
-            # nn.BatchNorm2d(self.hidden_dim)
-            # )
-
-    # def forward(self, input_p_centroids, input_x_centroids, input_p, input_x):
-        # '''
-        # input_x: B, in_dim, npoint, nsample
-        # input_p: B, 3, npoint, nsample
-        # input_x_centroids: B, in_dim, npoint
-        # input_p_centroids: B, 3, npoint
-        # '''
-        # B, in_dim, npoint, nsample = list(input_x.size())
-        # tmp = input_x_centroids
-
-        # input_x_centroids = self.linear_top(input_x_centroids)
-
-        # #print(input_p_centroids.size(), input_x_centroids.size(), self.phi)
-
-        # phi_xi = self.phi(input_x_centroids) # B, hidden_dim, npoint
-        # phi_xi = phi_xi.view(B, self.hidden_dim, npoint, 1).repeat(1,1,1,nsample) # B, hidden_dim, npoint, nsample
-
-        # # input_x - [bs, feature, npoints, l]
-        # # psi - [bs, o_feature, npoints, l]
-        # psi_xj = self.psi(input_x) # B, hidden_dim, npoint, nsample
-        # alpha_xj = self.alpha(input_x) # B, hidden_dim, npoint, nsample
-
-        # pipj = input_p_centroids.view(B,3,npoint,1).repeat(1,1,1,nsample) - input_p  # B, 3, npoint, nsample
-        # delta_p = self.delta(pipj) # B, hidden_dim, npoint, nsample
-
-        # y = F.softmax(self.gamma(phi_xi - psi_xj + delta_p), dim=-1)*(alpha_xj + delta_p) # B, hidden_dim, npoint, nsample
-        # y = y.sum(dim=-1)# B, hidden_dim, npoint
-        # y = self.linear_down(y)# B, input_dim, npoint
-
-        # return y+tmp
-
 def index_points(points, idx):
     """
     Input:
@@ -223,8 +145,6 @@ def index_points(points, idx):
     idx = idx.reshape(raw_size[0], -1)
     res = torch.gather(points, 1, idx[..., None].expand(-1, -1, points.size(-1)))
     return res.reshape(*raw_size, -1)
-
-
 
 class PTBlock(nn.Module):
     def __init__(self, in_dim, is_firstlayer=False, n_sample=16):
@@ -243,8 +163,8 @@ class PTBlock(nn.Module):
 
         # TODO: set the hidden/vector/out_dims
         self.hidden_dim = in_dim
-        self.out_dim = in_dim
-        self.vector_dim = in_dim
+        self.out_dim = min(4*in_dim, 512)
+        self.vector_dim = self.out_dim
         self.n_sample = n_sample
 
         # whether use BN
@@ -257,20 +177,20 @@ class PTBlock(nn.Module):
         )
         self.linear_down = nn.Sequential(
             nn.Conv1d(self.out_dim, self.in_dim, 1),
-            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
+            nn.BatchNorm1d(self.in_dim) if self.use_bn else nn.Identity()
         )
 
         self.phi = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
         self.psi = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
         self.alpha = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
+            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
 
         self.gamma = nn.Sequential(

@@ -15,11 +15,18 @@ import sys
 import provider
 import importlib
 import shutil
+import random
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 def parse_args():
     '''PARAMETERS'''
@@ -36,6 +43,7 @@ def parse_args():
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='decay rate [default: 1e-4]')
     parser.add_argument('--normal', action='store_true', default=False, help='Whether to use normal information [default: False]')
     parser.add_argument('--num_worker', type=int, default=8, help='dataloader threads')
+    parser.add_argument('--seed', type=int, default=2021, help= 'seed')
     return parser.parse_args()
 
 def test(model, loader, num_class=40):
@@ -68,6 +76,9 @@ def main(args):
 
     '''HYPER PARAMETER'''
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    '''SET THE SEED'''
+    setup_seed(args.seed)
 
     '''CREATE DIR'''
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))

@@ -12,7 +12,7 @@ class get_model(nn.Module):
         self.input_mlp = nn.Sequential(
             nn.Conv1d(in_channel, 32, 1), 
             nn.BatchNorm1d(32), 
-            nn.ReLU(), 
+            nn.ReLU(),
             nn.Conv1d(32, 32, 1),
             nn.BatchNorm1d(32))
 
@@ -37,7 +37,7 @@ class get_model(nn.Module):
         self.drop1 = nn.Dropout(0.4)
         self.fc2 = nn.Linear(256, num_class)
 
-        self.use_ln = False
+        self.use_ln = True
         if self.use_ln:
             self.final_ln = nn.LayerNorm(256)
         self.use_layer_norm = True
