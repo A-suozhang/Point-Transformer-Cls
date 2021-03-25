@@ -37,10 +37,9 @@ class get_model(nn.Module):
         self.drop1 = nn.Dropout(0.4)
         self.fc2 = nn.Linear(256, num_class)
 
-        self.use_ln = True
+        self.use_ln = False
         if self.use_ln:
             self.final_ln = nn.LayerNorm(256)
-        self.use_layer_norm = True
 
         self.save_flag = False
         self.save_dict = {}
@@ -87,6 +86,12 @@ class get_model(nn.Module):
             self.save_dict['attn_2'].append(attn_2)
             self.save_dict['attn_3'].append(attn_3)
             self.save_dict['attn_4'].append(attn_4)
+
+        del attn_0
+        del attn_1
+        del attn_2
+        del attn_3
+        del attn_4
 
         l4_points = l4_points.mean(dim=-1)
 

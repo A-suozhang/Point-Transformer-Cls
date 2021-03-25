@@ -182,7 +182,7 @@ def main(args):
             optimizer.zero_grad()
 
             # TODO: save the intermediate results
-            SAVE_INTERVAL = 50
+            SAVE_INTERVAL = 100
             NUM_PER_EPOCH = 1
 
             if (epoch+1) % SAVE_INTERVAL == 0:

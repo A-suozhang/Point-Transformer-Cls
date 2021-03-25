@@ -164,12 +164,17 @@ class PTBlock(nn.Module):
         # TODO: set the hidden/vector/out_dims
         self.hidden_dim = in_dim
         self.out_dim = min(4*in_dim, 512)
+        # self.out_dim = in_dim
         self.vector_dim = self.out_dim
         self.n_sample = n_sample
 
         # whether use BN
         self.use_bn = True
         self.use_ln = False
+
+        # whether to use the vector att or the original attention
+        self.use_vector_attn = False
+        self.nhead = 4
 
         self.linear_top = nn.Sequential(
             nn.Conv1d(in_dim, self.hidden_dim, 1),
@@ -182,15 +187,15 @@ class PTBlock(nn.Module):
 
         self.phi = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
+            # nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
         self.psi = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
+            # nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
         self.alpha = nn.Sequential(
             nn.Conv1d(self.hidden_dim, self.out_dim, 1),
-            nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
+            # nn.BatchNorm1d(self.out_dim) if self.use_bn else nn.Identity()
         )
 
         self.gamma = nn.Sequential(
@@ -224,6 +229,8 @@ class PTBlock(nn.Module):
 
         B, in_dim, npoint = list(input_x.size())
         n_sample = self.n_sample
+        k = min(n_sample, npoint)
+        h = self.nhead
 
         res = input_x
 
@@ -235,7 +242,7 @@ class PTBlock(nn.Module):
             self.knn = KNN(k=npoint, transpose_mode=True)
 
         _, idx = self.knn(input_p.contiguous(), input_p)
-        _, idx = self.knn(input_p, input_p)
+        # _, idx = self.knn(input_p, input_p)
         idx = idx.int()
 
         grouped_input_p = grouping_operation_cuda(input_p.transpose(1,2).contiguous(), idx) # [bs, xyz, npoint, k]
@@ -246,28 +253,32 @@ class PTBlock(nn.Module):
         input_x = self.linear_top(input_x)
 
         # TODO: apply the layer-norm
-        # however the original is [bs, dim, npoints]
+        # however the original is [bs, dim, npoint]
         if self.use_ln:
             input_x = self.ln_attn(input_x.transpose(1,2)).transpose(1,2)
 
         # grouped_input_x = index_points(input_x.permute([0,2,1]), idx.long()).permute([0,3,1,2])
         # grouped_input_x = grouping_operation_cuda(input_x.contiguous(), idx)  # [bs, xyz, npoint, K]
         phi = self.phi(input_x)
-        phi = phi[:,:,:,None].repeat(1,1,1,min(self.n_sample, npoint))
+        phi = phi[:,:,:,None].repeat(1,1,1,k)
         psi = grouping_operation_cuda(self.psi(input_x).contiguous(), idx)
         alpha = grouping_operation_cuda(self.alpha(input_x).contiguous(), idx) # [bs, xyz, npoint, k]
 
         relative_xyz = input_p.permute([0,2,1])[:,:,:,None] - grouped_input_p
         pos_encoding = self.delta(relative_xyz)    # [bs, dims, npoint, k]
 
-        attn_map = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)
-
-        # y = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)*(alpha + pos_encoding)
-
-        # the attn_map: [vector_dim];
-        # the alpha:    [out_dim]
-        y = attn_map.repeat(1, self.out_dim // self.vector_dim,1,1)*(alpha + pos_encoding)
-        y = y.sum(dim=-1)
+        if self.use_vector_attn:
+            # the attn_map: [vector_dim];
+            # the alpha:    [out_dim]
+            attn_map = F.softmax(self.gamma(phi - psi + pos_encoding), dim=-1)
+            y = attn_map.repeat(1, self.out_dim // self.vector_dim,1,1)*(alpha + pos_encoding)
+            y = y.sum(dim=-1)
+        else:
+            phi = phi.reshape(B, h, self.out_dim//h, npoint, k)
+            psi = psi.reshape(B, h, self.out_dim//h, npoint, k)
+            attn_map = F.softmax((phi*psi).reshape(B, self.out_dim, npoint, k) + pos_encoding, dim=-1)
+            y = attn_map*(alpha+pos_encoding)
+            y = y.sum(dim=-1)
 
         if self.use_ln:
             y = self.ln_down(y.transpose(1,2)).transpose(1,2)
