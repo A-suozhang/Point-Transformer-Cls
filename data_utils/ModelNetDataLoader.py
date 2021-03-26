@@ -38,11 +38,43 @@ def farthest_point_sample(point, npoint):
     point = point[centroids.astype(np.int32)]
     return point
 
+def translate_pointcloud(pointcloud):
+    xyz1 = np.random.uniform(low=2./3., high=3./2., size=[3])
+    xyz2 = np.random.uniform(low=-0.2, high=0.2, size=[3])
+
+    translated_pointcloud = np.add(np.multiply(pointcloud, xyz1), xyz2).astype('float32')
+    return translated_pointcloud
+
+
+def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.02):
+    N, C = pointcloud.shape
+    pointcloud += np.clip(sigma * np.random.randn(N, C), -1*clip, clip)
+    return pointcloud
+
+
+def rotate_pointcloud(pointcloud):
+    theta = np.pi*2 * np.random.uniform()
+    rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)],[np.sin(theta), np.cos(theta)]])
+    pointcloud[:,[0,2]] = pointcloud[:,[0,2]].dot(rotation_matrix) # random rotation (x,z)
+    return pointcloud
+
+def random_point_dropout(pc, max_dropout_ratio=0.875):
+    ''' batch_pc: BxNx3 '''
+    # for b in range(batch_pc.shape[0]):
+    dropout_ratio = np.random.random()*max_dropout_ratio # 0~0.875    
+    drop_idx = np.where(np.random.random((pc.shape[0]))<=dropout_ratio)[0]
+    # print ('use random drop', len(drop_idx))
+
+    if len(drop_idx)>0:
+        pc[drop_idx,:] = pc[0,:] # set to the first point
+    return pc
+
 class ModelNetDataLoader(Dataset):
-    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=True, cache_size=15000):
+    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=True, cache_size=15000, apply_aug=True):
         self.root = root
         self.npoints = npoint
         self.uniform = uniform
+        self.apply_aug = apply_aug
         self.catfile = os.path.join(self.root, 'modelnet40_shape_names.txt')
 
         self.cat = [line.rstrip() for line in open(self.catfile)]
@@ -90,6 +122,11 @@ class ModelNetDataLoader(Dataset):
 
             if len(self.cache) < self.cache_size:
                 self.cache[index] = (point_set, cls)
+
+        if self.apply_aug:
+            random_point_dropout(point_set[:,0:3])
+            translate_pointcloud(point_set[:,0:3])
+            jitter_pointcloud(point_set[:,0:3])
 
         return point_set, cls
 

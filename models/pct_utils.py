@@ -146,6 +146,25 @@ def index_points(points, idx):
     res = torch.gather(points, 1, idx[..., None].expand(-1, -1, points.size(-1)))
     return res.reshape(*raw_size, -1)
 
+class TransposeLayerNorm(nn.Module):
+
+    def __init__(self, dim):
+        super(TransposeLayerNorm, self).__init__()
+        self.dim = dim
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        if len(x.shape) == 3:
+            # [bs, in_dim, npoints]
+            pass
+        elif len(x.shape) == 4:
+            # [bs, in_dim, npoints, k]
+            pass
+        else:
+            raise NotImplementedError
+
+        return self.norm(x.transpose(1,-1)).transpose(1,-1)
+
 class PTBlock(nn.Module):
     def __init__(self, in_dim, is_firstlayer=False, n_sample=16):
         super().__init__()
@@ -163,14 +182,20 @@ class PTBlock(nn.Module):
 
         # TODO: set the hidden/vector/out_dims
         self.hidden_dim = in_dim
-        self.out_dim = min(4*in_dim, 512)
-        # self.out_dim = in_dim
+        # self.out_dim = min(4*in_dim, 512)
+        self.out_dim = in_dim
         self.vector_dim = self.out_dim
         self.n_sample = n_sample
 
-        # whether use BN
-        self.use_bn = True
-        self.use_ln = False
+        # whether use BN or LN or None
+        # 0 - None
+        # 1 - BN
+        # 2 - LN
+
+        self.use_bn = 1
+
+        # use transformer-like preLN before the attn & ff layer
+        self.pre_ln = False
 
         # whether to use the vector att or the original attention
         self.use_vector_attn = False
@@ -178,10 +203,12 @@ class PTBlock(nn.Module):
 
         self.linear_top = nn.Sequential(
             nn.Conv1d(in_dim, self.hidden_dim, 1),
+            # TransposeLayerNorm(self.hidden_dim),
             nn.BatchNorm1d(self.hidden_dim) if self.use_bn else nn.Identity()
         )
         self.linear_down = nn.Sequential(
             nn.Conv1d(self.out_dim, self.in_dim, 1),
+            # TransposeLayerNorm(self.in_dim),
             nn.BatchNorm1d(self.in_dim) if self.use_bn else nn.Identity()
         )
 
@@ -200,21 +227,25 @@ class PTBlock(nn.Module):
 
         self.gamma = nn.Sequential(
             nn.Conv2d(self.out_dim, self.hidden_dim, 1),
+            # TransposeLayerNorm(self.hidden_dim),
             nn.BatchNorm2d(self.hidden_dim) if self.use_bn else nn.Identity(),
             nn.ReLU(),
             nn.Conv2d(self.hidden_dim, self.vector_dim, 1),
+            # TransposeLayerNorm(self.vector_dim),
             nn.BatchNorm2d(self.vector_dim) if self.use_bn else nn.Identity()
         )
 
         self.delta = nn.Sequential(
             nn.Conv2d(3, self.hidden_dim, 1),
+            # TransposeLayerNorm(self.hidden_dim),
             nn.BatchNorm2d(self.hidden_dim) if self.use_bn else nn.Identity(),
             nn.ReLU(),
             nn.Conv2d(self.hidden_dim, self.out_dim, 1),
             nn.BatchNorm2d(self.out_dim) if self.use_bn else nn.Identity()
+            # TransposeLayerNorm(self.out_dim),
             )
 
-        if self.use_ln:
+        if self.pre_ln:
             self.ln_top = nn.LayerNorm(self.in_dim)
             self.ln_attn = nn.LayerNorm(self.hidden_dim)
             self.ln_down = nn.LayerNorm(self.out_dim)
@@ -247,14 +278,14 @@ class PTBlock(nn.Module):
 
         grouped_input_p = grouping_operation_cuda(input_p.transpose(1,2).contiguous(), idx) # [bs, xyz, npoint, k]
 
-        if self.use_ln:
+        if self.pre_ln:
             input_x = self.ln_top(input_x.transpose(1,2)).transpose(1,2)
 
         input_x = self.linear_top(input_x)
 
         # TODO: apply the layer-norm
         # however the original is [bs, dim, npoint]
-        if self.use_ln:
+        if self.pre_ln:
             input_x = self.ln_attn(input_x.transpose(1,2)).transpose(1,2)
 
         # grouped_input_x = index_points(input_x.permute([0,2,1]), idx.long()).permute([0,3,1,2])
@@ -280,7 +311,7 @@ class PTBlock(nn.Module):
             y = attn_map*(alpha+pos_encoding)
             y = y.sum(dim=-1)
 
-        if self.use_ln:
+        if self.pre_ln:
             y = self.ln_down(y.transpose(1,2)).transpose(1,2)
 
         y = self.linear_down(y)

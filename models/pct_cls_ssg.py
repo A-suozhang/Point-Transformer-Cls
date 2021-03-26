@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pct_utils import TDLayer, PTBlock, stem_knn
@@ -111,7 +112,15 @@ class get_loss(nn.Module):
     def __init__(self):
         super(get_loss, self).__init__()
 
-    def forward(self, pred, target, trans_feat):
-        total_loss = F.nll_loss(pred, target)
+    def forward(self, pred, target, trans_feat, smooth=True):
+        # dont know why the net output adds a torch.log_softmax after the logits, and here uses nll_loss
+        if smooth:
+            eps = 0.1
+            n_class = pred.shape[1]
+            one_hot = torch.zeros_like(pred).scatter(1, target.view(-1, 1), 1)
+            one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (n_class - 1)
+            total_loss = -(one_hot * pred).sum(dim=1).mean()
+        else:
+            total_loss = F.nll_loss(pred, target)
 
         return total_loss
