@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 import warnings
 import os
@@ -6,8 +7,6 @@ from tqdm import tqdm
 import pickle
 from torch.utils.data import Dataset
 warnings.filterwarnings('ignore')
-
-
 
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
@@ -51,7 +50,7 @@ def convert_to_binary_mask(masks):
 
 
 class ScanObjectNNDataLoader(Dataset):
-    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=True, cache_size=15000):
+    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=False, cache_size=15000):
         self.root = root
         self.npoints = npoint
         self.uniform = uniform
@@ -60,6 +59,12 @@ class ScanObjectNNDataLoader(Dataset):
         #self.cat = [line.rstrip() for line in open(self.catfile)]
         #self.classes = dict(zip(self.cat, range(len(self.cat))))
         self.normal_channel = normal_channel
+        assert normal_channel == 0 # no normal data for scanobjnn
+
+        if "nobg" in self.root:
+            self.use_mask = False
+        else:
+            self.use_mask = True
 
         #shape_ids = {}
         #shape_ids['train'] = [line.rstrip() for line in open(os.path.join(self.root, 'modelnet40_train.txt'))]
@@ -68,15 +73,19 @@ class ScanObjectNNDataLoader(Dataset):
         assert (split == 'train' or split == 'test')
         #shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
         # list of (shape_name, shape_txt_file_path) tuple
-        data = h5py.File(self.root + '/' + split + '_objectdataset_augmentedrot_scale75.h5', 'r')
+        data = h5py.File(self.root + '/' + (split+'ing' if split=='train' else split) + '_objectdataset.h5', 'r')
         self.points = data['data'][:]
         self.labels = data['label'][:]
-        self.masks = convert_to_binary_mask(data['mask'][:])
+        # TODO: there is no mask for main_split_nobg
+        if self.use_mask:
+            self.masks = convert_to_binary_mask(data['mask'][:])
+        else:
+            # empty masks
+            self.masks = torch.zeros(data['data'].shape[:2])
         print('The size of %s data is %d'%(split,self.points.shape[0]))
 
         self.cache_size = cache_size  # how many data points to cache in memory
         self.cache = {}  # from index to (point_set, cls) tuple
-        
 
     def __len__(self):
         return self.points.shape[0]
@@ -117,8 +126,8 @@ class ScanObjectNNDataLoader(Dataset):
 if __name__ == '__main__':
     import torch
 
-    data = ModelNetDataLoader('/data/modelnet40_normal_resampled/',split='train', uniform=False, normal_channel=True,)
+    data = ScanObjectNNDataLoader(root='../data/scanobjnn/main_split',split='train', uniform=False, normal_channel=False,)
     DataLoader = torch.utils.data.DataLoader(data, batch_size=12, shuffle=True)
-    for point,label in DataLoader:
+    for point,label,_ in DataLoader:
         print(point.shape)
         print(label.shape)

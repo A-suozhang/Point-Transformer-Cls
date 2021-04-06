@@ -9,6 +9,23 @@ from pointnet2_utils import ball_query as query_ball_point_cuda
 
 from knn_cuda import KNN
 
+def square_distance(src, dst):
+    """
+    Calculate Euclid distance between each two points.
+    src^T * dst = xn * xm + yn * ym + zn * zm；
+    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
+    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
+    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
+         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
+    Input:
+        src: source points, [B, N, C]
+        dst: target points, [B, M, C]
+    Output:
+        dist: per-point square distance, [B, N, M]
+    """
+    return torch.sum((src[:, :, None] - dst[:, None]) ** 2, dim=-1)
+
+
 def index_points_cuda(points, idx):
     """
 
@@ -29,7 +46,8 @@ def stem_knn(xyz, points, k):
     xyz = xyz.permute([0,2,1])
     _, idx = knn(xyz.contiguous(), xyz) # xyz: [bs, npoints, coord] idx: [bs, npoint, k]
     idx = idx.int()
-
+    
+    # take in [B, 3, N]
     grouped_xyz = grouping_operation_cuda(xyz.transpose(1,2).contiguous(), idx) # [bs, xyz, n_point, k]
     grouped_points = grouping_operation_cuda(points.contiguous(), idx) #B, C, npoint, k)
 
@@ -48,6 +66,7 @@ def sample_and_group_cuda(npoint, k, xyz, points):
         new_points: sampled points data, [B, C+C_xyz, npoint, k]
         grouped_xyz_norm: sampled relative points position data, [B, 3, npoint, k]
     """
+    k = min(npoint, k)
     knn = KNN(k=k, transpose_mode=True)
 
     B, N, C_xyz = xyz.shape
@@ -59,7 +78,6 @@ def sample_and_group_cuda(npoint, k, xyz, points):
     else:
         new_xyz = xyz
 
-    
     torch.cuda.empty_cache()
     _, idx = knn(xyz.contiguous(), new_xyz) # B, npoint, k
     idx = idx.int()
@@ -115,7 +133,6 @@ class TDLayer(nn.Module):
         B, input_dim, npoint = list(xyz.size())
         xyz = xyz.permute(0, 2, 1)
 
-
         new_xyz, grouped_xyz_norm, new_points = sample_and_group_cuda(self.npoint, self.k, xyz, points)
         # new_xyz: sampled points position data, [B, 3, npoint]
         # new_points: sampled points data, [B, C+C_xyz, npoint,k]
@@ -132,6 +149,62 @@ class TDLayer(nn.Module):
         #new_xyz = new_xyz.permute(0, 2, 1)
         #print(new_points_pooled.size())
         return new_xyz, new_points_pooled, grouped_xyz_norm, new_points
+
+class TULayer(nn.Module):
+    def __init__(self, npoint, input_dim, out_dim, k=3):
+        super().__init__()
+        '''
+        Transition Up Layer
+        npoint: number of input points
+        nsample: k in kNN, default 3
+        in_dim: feature dimension of the input feature x (output of the PCTLayer)
+        out_dim: feature dimension of the TDLayer
+
+        '''
+        self.npoint = npoint
+        self.k = k
+        self.input_dim = input_dim
+        self.out_dim = out_dim
+
+        self.linear_1 = nn.Conv1d(input_dim, out_dim, 1)
+        self.linear_2 = nn.Conv1d(out_dim, out_dim, 1)
+
+    def forward(self, xyz_1, xyz_2, points_1, points_2):
+        """
+        Input:
+            M < N
+            xyz_1: input points position data, [B, 3, M]
+            xyz_2: input points position data, [B, 3, N]
+            points_1: input points data, [B, C, M]
+            points_2: input points data, [B, C, N]
+
+            interpolate xyz_2's coordinates feature with knn neighbor's features weighted by inverse distance
+
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
+
+        B, input_dim, M = list(points_1.size())
+        B, output_dim, N = list(points_2.size())
+
+        points_1 = self.linear_1(points_1)
+        points_2 = self.linear_2(points_2)
+
+
+        dists = square_distance(xyz_2.transpose(1,2), xyz_1.transpose(1,2)) # [B, N, M]
+        dists, idx = dists.sort(dim=-1)
+        dists, idx = dists[:,:,:self.k], idx[:,:,:self.k]
+
+        dist_recip = 1.0 / (dists + 1e-8)
+        norm = torch.sum(dist_recip, dim=2, keepdim=True)
+        weight = dist_recip / norm
+        interpolated_points = torch.sum( \
+                        grouping_operation_cuda(points_1, idx.int())*weight.view(B, 1, N, 3)
+                                                ,dim=-1)
+
+
+        return xyz_2 , (interpolated_points + points_2)
 
 def index_points(points, idx):
     """
@@ -193,12 +266,11 @@ class PTBlock(nn.Module):
         # 2 - LN
 
         self.use_bn = 1
-
         # use transformer-like preLN before the attn & ff layer
         self.pre_ln = False
 
         # whether to use the vector att or the original attention
-        self.use_vector_attn = False
+        self.use_vector_attn = True
         self.nhead = 4
 
         self.linear_top = nn.Sequential(
@@ -272,8 +344,10 @@ class PTBlock(nn.Module):
         if npoint < self.n_sample:
             self.knn = KNN(k=npoint, transpose_mode=True)
 
+        # DEBUG ONLY: using the input_x: feature space knn!
+        # _, idx = self.knn(input_x.transpose(1,2), input_x.transpose(1,2))
+
         _, idx = self.knn(input_p.contiguous(), input_p)
-        # _, idx = self.knn(input_p, input_p)
         idx = idx.int()
 
         grouped_input_p = grouping_operation_cuda(input_p.transpose(1,2).contiguous(), idx) # [bs, xyz, npoint, k]

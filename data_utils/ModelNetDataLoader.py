@@ -6,8 +6,6 @@ import pickle
 from torch.utils.data import Dataset
 warnings.filterwarnings('ignore')
 
-
-
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
     pc = pc - centroid
@@ -45,12 +43,17 @@ def translate_pointcloud(pointcloud):
     translated_pointcloud = np.add(np.multiply(pointcloud, xyz1), xyz2).astype('float32')
     return translated_pointcloud
 
+def scale_pointcloud(pointcloud):
+    xyz1 = np.random.uniform(low=2./3., high=3./2., size=[3])
+
+    scaled_pointcloud = np.multiply(pointcloud, xyz1).astype('float32')
+    return scaled_pointcloud
+
 
 def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.02):
     N, C = pointcloud.shape
     pointcloud += np.clip(sigma * np.random.randn(N, C), -1*clip, clip)
     return pointcloud
-
 
 def rotate_pointcloud(pointcloud):
     theta = np.pi*2 * np.random.uniform()
@@ -70,12 +73,15 @@ def random_point_dropout(pc, max_dropout_ratio=0.875):
     return pc
 
 class ModelNetDataLoader(Dataset):
-    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=True, cache_size=15000, apply_aug=True):
+    def __init__(self, root,  npoint=1024, split='train', uniform=False, normal_channel=True, cache_size=15000, apply_aug=False):
         self.root = root
         self.npoints = npoint
         self.uniform = uniform
         self.apply_aug = apply_aug
         self.catfile = os.path.join(self.root, 'modelnet40_shape_names.txt')
+
+        if split != 'train':
+            assert apply_aug is not True
 
         self.cat = [line.rstrip() for line in open(self.catfile)]
         self.classes = dict(zip(self.cat, range(len(self.cat))))
@@ -124,9 +130,10 @@ class ModelNetDataLoader(Dataset):
                 self.cache[index] = (point_set, cls)
 
         if self.apply_aug:
-            random_point_dropout(point_set[:,0:3])
-            translate_pointcloud(point_set[:,0:3])
-            jitter_pointcloud(point_set[:,0:3])
+            # point_set[:,0:3] = random_point_dropout(point_set[:,0:3])
+            point_set[:,0:3] = translate_pointcloud(point_set[:,0:3])
+            point_set[:,0:3] = scale_pointcloud(point_set[:,0:3])
+            # point_set[:,0:3] = jitter_pointcloud(point_set[:,0:3])
 
         return point_set, cls
 

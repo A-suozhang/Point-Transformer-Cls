@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pct_utils import TDLayer, PTBlock, stem_knn
-
+from pct_utils import TDLayer, TULayer, PTBlock, stem_knn
 
 
 class get_model(nn.Module):
@@ -11,27 +10,30 @@ class get_model(nn.Module):
         in_channel = 6 if normal_channel else 3
         self.normal_channel = normal_channel
         self.input_mlp = nn.Sequential(
-            nn.Conv1d(in_channel, 32, 1), 
-            nn.BatchNorm1d(32), 
+            nn.Conv1d(in_channel, 32, 1),
+            nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Conv1d(32, 32, 1),
             nn.BatchNorm1d(32))
 
-        # self.TDLayer0 = TDLayer(npoint=N, input_dim=in_channel, out_dim=32, k=16)
-        self.PTBlock0 = PTBlock(in_dim=32)
+        self.in_dims = [32, 64, 128, 256]
+        self.out_dims = [64, 128, 256, 512]
+        self.neighbor_ks = [16, 32, 64, 16, 16]
 
-        self.TDLayer1 = TDLayer(npoint=int(N/4),input_dim=32, out_dim=64, k=16)
-        self.PTBlock1 = PTBlock(in_dim=64)
+        self.PTBlock0 = PTBlock(in_dim=self.in_dims[0], n_sample=self.neighbor_ks[0])
 
-        self.TDLayer2 = TDLayer(npoint=int(N/16),input_dim=64, out_dim=128, k=16)
-        self.PTBlock2 = PTBlock(in_dim=128)
+        self.TDLayer1 = TDLayer(npoint=int(N/4),input_dim=self.in_dims[0], out_dim=self.out_dims[0], k=self.neighbor_ks[1])
+        self.PTBlock1 = PTBlock(in_dim=self.out_dims[0], n_sample=self.neighbor_ks[1])
 
-        self.TDLayer3 = TDLayer(npoint=int(N/64),input_dim=128, out_dim=256, k=16)
-        self.PTBlock3 = PTBlock(in_dim=256)
+        self.TDLayer2 = TDLayer(npoint=int(N/16),input_dim=self.in_dims[1], out_dim=self.out_dims[1], k=self.neighbor_ks[2])
+        self.PTBlock2 = PTBlock(in_dim=self.out_dims[1], n_sample=self.neighbor_ks[2])
 
-        self.TDLayer4 = TDLayer(npoint=int(N/256),input_dim=256, out_dim=512, k=16)
-        self.PTBlock4 = PTBlock(in_dim=512)
+        self.TDLayer3 = TDLayer(npoint=int(N/64),input_dim=self.in_dims[2], out_dim=self.out_dims[2], k=self.neighbor_ks[3])
+        self.PTBlock3 = PTBlock(in_dim=self.out_dims[2], n_sample=self.neighbor_ks[3])
 
+        self.TDLayer4 = TDLayer(npoint=int(N/256),input_dim=self.in_dims[3], out_dim=self.out_dims[3], k=self.neighbor_ks[4])
+        # self.TDLayer4 = TDLayer(npoint=int(N/64),input_dim=256, out_dim=512, k=self.neighbor_ks[4])
+        self.PTBlock4 = PTBlock(in_dim=self.out_dims[3], n_sample=self.neighbor_ks[4])
 
         self.fc1 = nn.Linear(512, 256)
         self.bn1 = nn.BatchNorm1d(256)
@@ -46,8 +48,6 @@ class get_model(nn.Module):
         self.save_dict = {}
         for i in range(5):
             self.save_dict['attn_{}'.format(i)] = []
-
-
 
     def save_intermediate(self):
 
@@ -105,17 +105,17 @@ class get_model(nn.Module):
         x = self.fc2(x)
         x = F.log_softmax(x, -1)
 
-        return x, l4_points
+        return x
 
 
 class get_loss(nn.Module):
     def __init__(self):
         super(get_loss, self).__init__()
 
-    def forward(self, pred, target, trans_feat, smooth=True):
+    def forward(self, pred, target, smooth=True):
         # dont know why the net output adds a torch.log_softmax after the logits, and here uses nll_loss
         if smooth:
-            eps = 0.1
+            eps = 0.2
             n_class = pred.shape[1]
             one_hot = torch.zeros_like(pred).scatter(1, target.view(-1, 1), 1)
             one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (n_class - 1)
