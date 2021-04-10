@@ -2,11 +2,12 @@ import pickle
 import os
 import sys
 import numpy as np
+import torch
 import torch.utils.data as torch_data
 from torch.utils.data import DataLoader
 
 class ScannetDataset(torch_data.Dataset):
-    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, sample_rate=None):
+    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, with_instance=False,sample_rate=None, k=16):
         super().__init__()
         print(' ---- load data from', root)
         self.npoints = npoints
@@ -15,14 +16,30 @@ class ScannetDataset(torch_data.Dataset):
         self.indices = [0, 1, 2]
         if with_norm: self.indices += [3, 4, 5]
         if with_rgb: self.indices += [6, 7, 8]
+        self.with_instance = with_instance
+
+        # TODO: dirty, should fix
+        self.k = k # k is the max neighbor k in point-transformer arch
+
         print('load scannet dataset <{}> with npoint {}, indices: {}.'.format(split, npoints, self.indices))
 
-        data_filename = os.path.join(root, 'scannet_%s_rgb21c_pointid.pickle' % (split))
-        with open(data_filename, 'rb') as fp:
-            self.scene_points_list = pickle.load(fp)
-            self.semantic_labels_list = pickle.load(fp)
-            scene_points_id = pickle.load(fp)
-            num_point_all = pickle.load(fp)
+        # deprecated version of pickle load
+        # data_filename = os.path.join(root, 'scannet_%s_rgb21c_pointid.pickle' % (split))
+        # with open(data_filename, 'rb') as fp:
+            # self.scene_points_list = pickle.load(fp)
+            # self.semantic_labels_list = pickle.load(fp)
+            # # scene_points_id = pickle.load(fp)
+            # num_point_all = pickle.load(fp)
+
+        # TEST: newer loading of the pth file
+        data_filename = os.path.join(root, 'new_{}.pth'.format(split))
+        data_dict = torch.load(data_filename)
+        self.scene_points_list = data_dict['data']
+        self.semantic_labels_list = data_dict['label']
+        if self.with_instance:
+            self.instance_label_list = data_dict['instance']
+        #scene_points_id = pickle.load(fp)
+        num_point_all = data_dict['npoints']
 
         if split == 'train':
             labelweights = np.zeros(21)
@@ -39,7 +56,7 @@ class ScannetDataset(torch_data.Dataset):
         else:
             raise ValueError('split must be train or eval.')
 
-        # sample & repeat points
+        # sample & repeat scenes, older version deprecated
         if sample_rate is not None:
             num_point = npoints
             sample_prob = num_point_all / np.sum(num_point_all)
@@ -56,16 +73,17 @@ class ScannetDataset(torch_data.Dataset):
             self.room_idxs = np.arange(len(self.scene_points_list))
 
         print("Totally {} samples in {} set.".format(len(self.room_idxs), split))
-    
+
     def __getitem__(self, index):
         index = self.room_idxs[index]
-
         data_set = self.scene_points_list[index]
         point_set = data_set[:, :3]
+        if self.with_instance:
+            instance_set = self.instance_label_list[index]
         semantic_seg = self.semantic_labels_list[index].astype(np.int32)
         coordmax = np.max(point_set, axis=0)
         coordmin = np.min(point_set, axis=0)
-        smpmin = np.maximum(coordmax-[2, 2, 3.0], coordmin)
+        mpmin = np.maximum(coordmax-[2, 2, 3.0], coordmin)
         smpmin[2] = coordmin[2]
         smpsz = np.minimum(coordmax-smpmin,[2,2,3.0])
         smpsz[2] = coordmax[2]-coordmin[2]
@@ -80,6 +98,11 @@ class ScannetDataset(torch_data.Dataset):
             curchoice = np.sum((point_set >= (curmin - 0.2)) * (point_set <= (curmax + 0.2)), axis=1) == 3
             cur_point_set = point_set[curchoice, :]
             cur_data_set = data_set[curchoice, :]
+            if self.with_instance:
+                try:
+                    cur_instance_set = instance_set[curchoice]
+                except IndexError:
+                    import ipdb; ipdb.set_trace()
             cur_semantic_seg = semantic_seg[curchoice]
             if len(cur_semantic_seg) == 0:
                 continue
@@ -92,6 +115,8 @@ class ScannetDataset(torch_data.Dataset):
 
         choice = np.random.choice(len(cur_semantic_seg), self.npoints, replace=True)
         semantic_seg = cur_semantic_seg[choice]
+        if self.with_instance:
+            instance_seg = cur_instance_set[choice]
         mask = mask[choice]
         sample_weight = self.labelweights[semantic_seg]
         sample_weight *= mask
@@ -113,7 +138,24 @@ class ScannetDataset(torch_data.Dataset):
             sample_weight[drop_idx] *= 0
 
         point_set = point_set[:, self.indices]
-        return point_set, semantic_seg, sample_weight
+
+        # Pack the instance
+        # WARNING: the deprecated(failed attempt) of the instance_relatiion dict
+        # if self.with_instance:
+            # k = self.k
+            # idxes = [np.where(instance_seg == x)[0] for x in np.unique(instance_seg)]
+            # instance_relations = np.full([instance_seg.size,k], -1)
+            # for i, idx in enumerate(idxes):
+                # choices = np.random.choice(idxes[i], (idxes[i].size,k))
+                # instance_relations[idxes[i]] = choices
+            # instance_relations[:,0] = np.arange(instance_relations.shape[0])
+            # instance_relations = instance_relations.astype(int)
+
+        if self.with_instance:
+            return point_set, semantic_seg, sample_weight, instance_seg
+        else:
+            return point_set, semantic_seg, sample_weight
+
 
     def __len__(self):
         return len(self.room_idxs)
@@ -183,7 +225,7 @@ class ScannetDatasetWholeScene(torch_data.IterableDataset):
         semantic_seg_ini = self.semantic_labels_list[index].astype(np.int32)
         coordmax = np.max(point_set_ini,axis=0)
         coordmin = np.min(point_set_ini,axis=0)
-        grid_size=8
+        grid_size=2
         nsubvolume_x = np.ceil((coordmax[0]-coordmin[0])/grid_size).astype(np.int32)
         nsubvolume_y = np.ceil((coordmax[1]-coordmin[1])/grid_size).astype(np.int32)
         point_sets = list()
@@ -242,7 +284,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
         with open(data_filename, 'rb') as fp:
             self.scene_points_list = pickle.load(fp)
             self.semantic_labels_list = pickle.load(fp)
-            self.scene_points_id = pickle.load(fp)
+            # self.scene_points_id = pickle.load(fp)
             self.scene_points_num = pickle.load(fp)
             file_path = os.path.join(scene_list_dir, 'scannetv2_{}.txt'.format(split))
 
@@ -295,8 +337,8 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
 
         print(' ==== generate batch data of {} ==== '.format(self.scene_list[index]))
 
-        # delta = 1.0
-        delta = 4.0
+        delta = 1.0
+        # delta = 4.0
         # if self.with_rgb:
         point_set_ini = self.scene_points_list[index]
         # else:
@@ -355,7 +397,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
             point_idxs[nearest_block_idx] = np.concatenate((point_idxs[nearest_block_idx], small_block_idxs), axis = 0)
             num_blocks = len(point_sets)
 
-        #divide large blocks
+        # divide large blocks
         num_blocks = len(point_sets)
         div_blocks = []
         div_blocks_seg = []
@@ -408,18 +450,21 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
 if __name__  == "__main__":
     # DEFAULT using only xyz, since with_rgb and with_norm is False
     # TODO: change it to make it normally use all 9-dims
-    # trainset = ScannetDataset(root='../data/scannet_v2/scannet_pickles', npoints=8192, split='train')
-    # trainloader = DataLoader(trainset, batch_size=4, shuffle=True)
+    trainset = ScannetDataset(root='../data/scannet_v2/scannet_pickles', npoints=8192, split='train', with_instance=True)
+    trainloader = DataLoader(trainset, batch_size=4, shuffle=True)
+
+    for idx, data in enumerate(trainloader):
+        print(idx, data[0].shape, data[2].shape, data[4].shape)
 
     # train_it = iter(trainloader)
     # l = train_it.__next__()
 
     # testset = ScannetDataset(root='../data/scannet_v2/scannet_pickles', npoints=8192, split='eval')
     # testset = ScannetDatasetWholeScene(root='../data/scannet_v2/scannet_pickles', npoints=8192, split='eval')
-    testset = ScannetDatasetWholeScene_evaluation(root='../data/scannet_v2/scannet_pickles', scene_list_dir='../data/scannet_v2/metadata',split='eval',block_points=8192, with_rgb=True, with_norm=True)
-    testloader = DataLoader(testset, batch_size=16, shuffle=False)
+    # testset = ScannetDatasetWholeScene_evaluation(root='../data/scannet_v2/scannet_pickles', scene_list_dir='../data/scannet_v2/metadata',split='eval',block_points=8192, with_rgb=True, with_norm=True)
+    # testloader = DataLoader(testset, batch_size=16, shuffle=False)
 
-    test_it = iter(testloader)
+    # test_it = iter(testloader)
 
     # for i,j in enumerate(testloader):
         # print(i)

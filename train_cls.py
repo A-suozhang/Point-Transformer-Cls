@@ -6,7 +6,8 @@ from data_utils.ModelNetDataLoader import ModelNetDataLoader
 from data_utils.ScanObjectNNDataLoader import ScanObjectNNDataLoader
 from data_utils.ScanNetDataLoader import *
 
-from data_utils.PointAugs import *
+# from data_utils.PointAugs import *
+from utils.PointAugs import *
 from data_utils.Minkowski.ModelNetVoxelLoader import *
 
 from test_scannet import test_scannet
@@ -35,6 +36,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'model'))
 
+torch.cuda.set_device(0)
+# torch.backends.cudnn.enabled=False
+
 def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -61,7 +65,8 @@ def parse_args():
     parser.add_argument('--log_dir', type=str, default=None, help='experiment root')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='decay rate [default: 1e-4]')
     parser.add_argument('--normal', type=int, default=0, help='how many normal channels are aside from xyz')
-    parser.add_argument('--num_worker', type=int, default=8, help='dataloader threads')
+    parser.add_argument('--num_worker', type=int, default=0, help='dataloader threads')
+    parser.add_argument('--with_instance', action='store_true', default=False, help='whether to use the instance information')
     parser.add_argument('--seed', type=int, default=2021, help= 'seed')
     return parser.parse_args()
 
@@ -203,6 +208,9 @@ def main(args):
         assert "mink" in args.model
         assert args.voxel_size > 0
 
+    if args.with_instance:
+        assert "scannet" in args.dataset
+
     '''DATA LOADING'''
     if args.dataset == "modelnet":
         log_string('Load dataset {}'.format(args.dataset))
@@ -268,7 +276,8 @@ def main(args):
     elif args.dataset == 'scannet':
         num_class = 21
         if not args.eval_only:
-            trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train')
+            trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_instance=args.with_instance)
+
             trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
 
         testset = ScannetDatasetWholeScene(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='eval')
@@ -279,7 +288,7 @@ def main(args):
         # final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
 
         # DEBUG: when using more num_workers, could cause error, doesnot know why
-        testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+        testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
         final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
     else:
@@ -308,6 +317,8 @@ def main(args):
         classifier = MinkowskiPointNet(in_channel=3, out_channel=41, embedding_channel=1024,dimension=3).cuda()
         criterion = nn.CrossEntropyLoss().cuda()
         classifier.loss = criterion
+
+
 
     try:
         if args.pretrain:
@@ -353,6 +364,7 @@ def main(args):
 
     # only run for one epoch on the eval-only mode
     if args.eval_only:
+        assert args.pretrain
         start_epoch = 0
         args.epoch = 1
 
@@ -362,10 +374,10 @@ def main(args):
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
 
         scheduler.step()
+        log_string('Cur LR: {:.5f}'.format(optimizer.param_groups[0]['lr']))
         # when eval only, skip the traininig part
 
         if not args.eval_only:
-
             for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
                 if not args.use_voxel:
                     if "modelnet" in args.dataset:
@@ -393,8 +405,12 @@ def main(args):
                     elif "scannet" in args.dataset:
                         # TODO: fiil the scannet loading here
                         # TODO: maybe implement the grad-accmu/or simply not
-                        points, target, sample_weight = data
-                        points, target, sample_weight = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda()
+                        if args.with_instance:
+                            points, target, sample_weight, instance = data
+                            points, target, sample_weight, instance = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda(), instance.cuda()
+                        else:
+                            points, target, sample_weight = data
+                            points, target, sample_weight = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda()
 
                 else:
                     # use voxel
@@ -405,7 +421,7 @@ def main(args):
                 optimizer.zero_grad()
 
                 # TODO: save the intermediate results
-                SAVE_INTERVAL = 100
+                SAVE_INTERVAL = 50
                 NUM_PER_EPOCH = 1
 
                 if (epoch+1) % SAVE_INTERVAL == 0:
@@ -424,7 +440,11 @@ def main(args):
                     classifier.save_flag = False
 
                 classifier = classifier.train()
-                pred = classifier(points)
+                # when with-instance, use instance label to guide the point-transformer training
+                if args.with_instance:
+                    pred = classifier(points, instance)
+                else:
+                    pred = classifier(points)
                 if 'scannet' in args.dataset:
                     loss = criterion(pred, target.long(), sample_weight)
                 else:
@@ -448,59 +468,81 @@ def main(args):
             log_string('Train Instance Accuracy: %f' % train_instance_acc)
 
             '''TEST'''
-            if (epoch+1) % 20 == 0:
-                with torch.no_grad():
-                    returned_metric = test(classifier.eval(), testDataLoader, num_class=num_class, log_string=log_string)
+            if not "scannet" in args.dataset:
+                # DEBUG: Temporarily disable eval for scannet for now, just test at last
+                if (epoch+1) % 20 == 0:
+                    with torch.no_grad():
+                        returned_metric = test(classifier.eval(), testDataLoader, num_class=num_class, log_string=log_string)
 
-                if 'scannet' in args.dataset:
-                    mIoU = returned_metric
-                    if (mIoU >= best_mIoU):
-                        best_mIoU = mIoU
-                        best_epoch = epoch + 1
+                    if 'scannet' in args.dataset:
+                        mIoU = returned_metric
+                        if (mIoU >= best_mIoU):
+                            best_mIoU = mIoU
+                            best_epoch = epoch + 1
 
-                    if (mIoU >= best_mIoU):
-                        logger.info('Save model...')
-                        savepath = str(checkpoints_dir) + '/best_model.pth'
-                        log_string('Saving at %s'% savepath)
-                        state = {
-                            'epoch': best_epoch,
-                            'mIoU': mIoU,
-                            'model_state_dict': classifier.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                        }
-                        torch.save(state, savepath)
-                else:
-                    instance_acc, class_acc = returned_metric
+                        if (mIoU >= best_mIoU):
+                            logger.info('Save model...')
+                            savepath = str(checkpoints_dir) + '/best_model.pth'
+                            log_string('Saving at %s'% savepath)
+                            state = {
+                                'epoch': best_epoch,
+                                'mIoU': mIoU,
+                                'model_state_dict': classifier.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                            }
+                            torch.save(state, savepath)
+                    else:
+                        instance_acc, class_acc = returned_metric
 
-                    if (instance_acc >= best_instance_acc):
-                        best_instance_acc = instance_acc
-                        best_epoch = epoch + 1
+                        if (instance_acc >= best_instance_acc):
+                            best_instance_acc = instance_acc
+                            best_epoch = epoch + 1
 
-                    if (class_acc >= best_class_acc):
-                        best_class_acc = class_acc
+                        if (class_acc >= best_class_acc):
+                            best_class_acc = class_acc
 
-                    log_string('Test Instance Accuracy: %f, Class Accuracy: %f'% (instance_acc, class_acc))
-                    log_string('Best Instance Accuracy: %f, Class Accuracy: %f'% (best_instance_acc, best_class_acc))
+                        log_string('Test Instance Accuracy: %f, Class Accuracy: %f'% (instance_acc, class_acc))
+                        log_string('Best Instance Accuracy: %f, Class Accuracy: %f'% (best_instance_acc, best_class_acc))
 
-                    if (instance_acc >= best_instance_acc):
-                        logger.info('Save model...')
-                        savepath = str(checkpoints_dir) + '/best_model.pth'
-                        log_string('Saving at %s'% savepath)
-                        state = {
-                            'epoch': best_epoch,
-                            'instance_acc': instance_acc,
-                            'class_acc': class_acc,
-                            'model_state_dict': classifier.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                        }
-                        torch.save(state, savepath)
+                        if (instance_acc >= best_instance_acc):
+                            logger.info('Save model...')
+                            savepath = str(checkpoints_dir) + '/best_model.pth'
+                            log_string('Saving at %s'% savepath)
+                            state = {
+                                'epoch': best_epoch,
+                                'instance_acc': instance_acc,
+                                'class_acc': class_acc,
+                                'model_state_dict': classifier.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                            }
+                            torch.save(state, savepath)
 
         '''the eval only mode'''
-        if args.dataset == 'scannet' and args.eval_only:
-            args.mode = 'eval'
-            test_scannet(args, classifier.eval(), final_test_loader, log_string)
+        # if args.dataset == 'scannet' and args.eval_only:
+        # DEBUG: the final test of the scannet
+        # if args.dataset == 'scannet':
+            # args.mode = 'eval'
+            # test_scannet(args, classifier.eval(), final_test_loader, log_string)
 
         global_epoch += 1
+
+    # final save of the model
+    logger.info('Save model...')
+    savepath = str(checkpoints_dir) + '/best_model.pth'
+    log_string('Saving at %s'% savepath)
+    state = {
+        # 'epoch': best_epoch,
+        # 'mIoU': mIoU,
+        'model_state_dict': classifier.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    torch.save(state, savepath)
+
+
+    if args.dataset == 'scannet':
+        args.mode = 'eval'
+        test_scannet(args, classifier.eval(), final_test_loader, log_string)
+
 
 
     logger.info('End of training...')

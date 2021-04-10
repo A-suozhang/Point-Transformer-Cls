@@ -5,6 +5,7 @@ import json
 import numpy as np
 import csv
 import pickle
+from plyfile import PlyData, PlyElement
 
 def read_aggregation(filename):
     assert os.path.isfile(filename)
@@ -67,9 +68,43 @@ def gen_label_map():
             label_map[i] = 0
     return label_map
 
+def reload_ply(scan_name):
+    #     print(scene_id[i])
+    data_file = osp.join(scannet_dir, scan_name, scan_name + \
+                      "_vh_clean_2.ply")
+    label_file = osp.join(scannet_dir, scan_name, scan_name + \
+                      "_vh_clean_2.labels.ply")
+    print(label_file)
+    ply_data_tmp = PlyData.read(data_file)['vertex']
+    ply_data = np.stack([
+        ply_data_tmp['x'],
+        ply_data_tmp['y'],
+        ply_data_tmp['z'],
+        ply_data_tmp['red'],
+        ply_data_tmp['green'],
+        ply_data_tmp['blue'],
+    ],
+        axis=-1
+    ).astype(np.float32)
+    ply_label = PlyData.read(label_file)['vertex']['label']
 
-# split='train'
-split='eval'
+    keep_idx = np.where((ply_label > 0) & (ply_label < 41))
+    print('original legth: {}'.format(len(keep_idx[0])))
+
+    ply_label[np.where(ply_label == 50)] = 39
+    ply_label[np.where(ply_label == 149)] = 40
+
+    keep_idx = np.where((ply_label > 0) & (ply_label < 41))
+    print('New legth: {}'.format(len(keep_idx[0])))
+
+    new_data = ply_data[keep_idx]
+    new_label = ply_label[keep_idx]
+
+    print(new_data.shape, new_label.shape)
+    return new_data, new_label
+
+split='train'
+# split='eval'
 file_list = '../data/scannet_v2/metadata/scannetv2_{}.txt'.format(split)
 
 '''loading the pickle file'''
@@ -134,7 +169,7 @@ def gen_instance_lables(label_map, agg_file, seg_file):
     num_instances = len(np.unique(list(object_id_to_segs.keys()))) # num_instances
     # instance labels:
     # list of [npoints] conatininig elements of the [0(no_obj)-num_objs]
-    instance_ids = np.zeros(shape=(num_verts), dtype=np.uint32)# 0: unannotated
+    instance_ids = np.zeros(shape=(num_verts), dtype=np.int32)# 0: unannotated
     object_id_to_label_id = {}
     for object_id, segs in object_id_to_segs.items():
     #     print(segs)
@@ -159,7 +194,7 @@ def gen_instance_lables(label_map, agg_file, seg_file):
 
 
 all_instance_ids = []
-for scan_name in scene_names:
+for i_scan, scan_name in enumerate(scene_names):
     print('Processing {}'.format(scan_name))
     scannet_dir = '../data/scannet_v2/scans'
     # scan_name = 'scene0568_01'
@@ -173,10 +208,25 @@ for scan_name in scene_names:
 save_dict = {}
 save_dict['data'] = pickle_data
 save_dict['label'] = pickle_label
+for i in range(len(all_instance_ids)):
+    all_instance_ids[i] = all_instance_ids[i].astype(int)
 save_dict['instance'] = all_instance_ids
 save_dict['npoints'] = pickle_num_points
 
+rectify_ids = [585, 587, 823]
+# rectify_ids = [823]
+for ids in rectify_ids:
+    new_data, new_label = reload_ply(scene_names[ids])
+    save_dict['data'][ids] = new_data
+    new_label_map = gen_label_map()
+    new_label = new_label_map[new_label]
+    save_dict['label'][ids] = new_label
+
+for i in range(len(save_dict['data'])):
+    if save_dict['data'][0].shape[0] != save_dict['instance'][0].shape[0]:
+        print('Hit!')
+
 # np.save(osp.join(pickle_files,'new_{}.npy'.format(split)), save_dict)
-torch.save(osp.join(pickle_files,'new_{}.pth'.format(split)), save_dict)
+torch.save(save_dict, osp.join(pickle_files,'new_{}.pth'.format(split)))
 
 
