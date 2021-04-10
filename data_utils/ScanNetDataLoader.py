@@ -7,7 +7,7 @@ import torch.utils.data as torch_data
 from torch.utils.data import DataLoader
 
 class ScannetDataset(torch_data.Dataset):
-    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, with_instance=False,sample_rate=None, k=16):
+    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, with_instance=False,sample_rate=None):
         super().__init__()
         print(' ---- load data from', root)
         self.npoints = npoints
@@ -17,9 +17,6 @@ class ScannetDataset(torch_data.Dataset):
         if with_norm: self.indices += [3, 4, 5]
         if with_rgb: self.indices += [6, 7, 8]
         self.with_instance = with_instance
-
-        # TODO: dirty, should fix
-        self.k = k # k is the max neighbor k in point-transformer arch
 
         print('load scannet dataset <{}> with npoint {}, indices: {}.'.format(split, npoints, self.indices))
 
@@ -139,7 +136,6 @@ class ScannetDataset(torch_data.Dataset):
 
         point_set = point_set[:, self.indices]
 
-        # Pack the instance
         # WARNING: the deprecated(failed attempt) of the instance_relatiion dict
         # if self.with_instance:
             # k = self.k

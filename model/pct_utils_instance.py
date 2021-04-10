@@ -366,6 +366,31 @@ class PTBlock(nn.Module):
         _, idx = self.knn(input_p.contiguous(), input_p)
         idx = idx.int()
 
+
+        '''
+        # Ver1.0: mask the knn(instance label as auxiliary filter)
+        # older version of the instance mask
+        # directly ck if knn grouped point within the same pointset
+        # then mask if not in
+
+        if instance is not None:
+            print('start processing the instance mask')
+            masks = []
+            for i_bs, idx_cur_bs in enumerate(idx):
+                # [4096, 16] cur_bs_idx
+                # [4096]: instance_label[i_bs]
+                mask = instance[i_bs][idx_cur_bs.long()] # [4096, 16]
+                mask = mask - mask[:,0].unsqueeze(-1) # get the 1st column(the 1st element in k-elements is itself)
+                mask = (mask == 0).int() # acuiqre the 0-1 mask
+                masks.append(mask)
+            masks = torch.stack(masks)
+        print('cur kayer: the ratio is: {}'.format(masks.sum() / masks.nelement()))
+        '''
+
+        '''
+        # Ver2.0: directly use the points of the same instance label as neighbors
+        # random sample k points in the same instance
+        '''
         if instance is not None:
             instance_relations = []
             for i_bs in range(instance.shape[0]):
@@ -392,10 +417,14 @@ class PTBlock(nn.Module):
             idx = idx*instance_relation_zero_mask + instance_relations*instance_relation_nonzero_mask
             idx = idx.int()
 
+        # ===================== Deprecated Methods ===========================1
+
         '''
+        # Ver 2.3: failed version of receiving a instance_relation,
+        # however, point downsample could not be handled
         # the instance feed in here is of the same size as the idxes
         # if the num within the same instance group as less than k
-        # then the instance_relation will contain 0, we will replace these 0s 
+        # then the instance_relation will contain -1, we will replace these -1s
         # with the original idx acquired by knn
         if instance_relation is not None:
             print('replacing the instance_relation')
@@ -409,7 +438,9 @@ class PTBlock(nn.Module):
             idx = instance_relation.int()
 
         '''
+
         '''
+        Ver 2.2: Hash Table-based
         1st pack the instance into dict(hash table)
         then ref the points within the same scope to replace the knn points
         if ont enough points of the same insatcne, keep the knn idxs
@@ -430,8 +461,6 @@ class PTBlock(nn.Module):
                     instance_dict[ins_k] = torch.tensor(instance_dict[ins_k]).to(instance.device)
                 instance_dicts.append(instance_dict)
 
-            # TODO: try scatter: FAILED
-            # TODO: maybe because moving data from cpu to cuda causes the slow FAILED
             l1 = []
             for i_bs in range(instance.shape[0]):
                 l0 = []
@@ -445,7 +474,9 @@ class PTBlock(nn.Module):
                 l1.append(tmp1)
             new_idx = torch.stack(l1)
         '''
+
         '''
+        Ver: 2.1: Naive Version of for-loop replacement 
         # Too slow version, needs improving
         # 1st use knn then use mask the value belongs not to the same instance
         instance_masks = []
@@ -463,24 +494,8 @@ class PTBlock(nn.Module):
         instance_masks = torch.stack(instance_masks)
         '''
 
-        '''
-        older version of the instance mask
-        directly ck if knn grouped point within the same pointset
-        then mask if not in
+        # ==========================================================================================
 
-        if instance is not None:
-            print('start processing the instance mask')
-            masks = []
-            for i_bs, idx_cur_bs in enumerate(idx):
-                # [4096, 16] cur_bs_idx
-                # [4096]: instance_label[i_bs]
-                mask = instance[i_bs][idx_cur_bs.long()] # [4096, 16]
-                mask = mask - mask[:,0].unsqueeze(-1) # get the 1st column(the 1st element in k-elements is itself)
-                mask = (mask == 0).int() # acuiqre the 0-1 mask
-                masks.append(mask)
-            masks = torch.stack(masks)
-        print('cur kayer: the ratio is: {}'.format(masks.sum() / masks.nelement()))
-        '''
         grouped_input_p = grouping_operation_cuda(input_p.transpose(1,2).contiguous(), idx) # [bs, xyz, npoint, k]
 
         if self.pre_ln:

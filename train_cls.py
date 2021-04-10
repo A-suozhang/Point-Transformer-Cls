@@ -36,7 +36,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'model'))
 
-torch.cuda.set_device(0)
+# torch.cuda.set_device(0)
 # torch.backends.cudnn.enabled=False
 
 def setup_seed(seed):
@@ -72,8 +72,8 @@ def parse_args():
 
 def test(model, loader, num_class=40, log_string=None):
     # TODO: dirty fix of parsing the log_string directly in
-    # when using the scannet dataset val, the dataloader is an inf loader, could not use tqdm here
     if "scannet" in args.dataset:
+        # when using the scannet dataset val, the dataloader is an inf loader, could not use tqdm here
         dataloader_len = len(loader.dataset.scene_points_list)
     else:
         dataloader_len = len(loader)
@@ -89,7 +89,6 @@ def test(model, loader, num_class=40, log_string=None):
         class_acc = np.zeros((num_class,3))
 
     for j, data in tqdm(enumerate(loader), total=dataloader_len):
-        # data = iter(loader).__next__()
         if "modelnet" in args.dataset:
             points, target = data
             target = target[:, 0]
@@ -164,6 +163,7 @@ def test(model, loader, num_class=40, log_string=None):
         return instance_acc, class_acc
 
 def main(args):
+
     def log_string(str):
         logger.info(str)
         print(str)
@@ -216,12 +216,6 @@ def main(args):
         log_string('Load dataset {}'.format(args.dataset))
         num_class = 40
         DATA_PATH = './data/modelnet40_normal_resampled/'
-        # point_transforms = transforms.Compose([
-            # PointcloudToTensor(),
-            # PointcloudScale(),
-            # PointcloudTranslate(),
-            # PointcloudJitter(),
-        # ])
         TRAIN_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='train',
                                                          normal_channel=args.normal, apply_aug=True)
         TEST_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='test',
@@ -279,15 +273,11 @@ def main(args):
             trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_instance=args.with_instance)
 
             trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
-
+        # FIXME: actually, we donot eval the scannet during training, for its too slow, so only the final_test is applied at the end of the training to acquire mIOU
         testset = ScannetDatasetWholeScene(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='eval')
-        # testset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='eval')
         final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True)
 
-        # testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
-        # final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
-
-        # DEBUG: when using more num_workers, could cause error, doesnot know why
+        # DEBUG: when using more num_workers, could cause error, doesnot know why, havenot tested afterwards
         testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
         final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -317,11 +307,11 @@ def main(args):
         classifier = MinkowskiPointNet(in_channel=3, out_channel=41, embedding_channel=1024,dimension=3).cuda()
         criterion = nn.CrossEntropyLoss().cuda()
         classifier.loss = criterion
-
-
-
+    
+    '''Loading existing ckpt'''
     try:
         if args.pretrain:
+            # FIXME: currently only loading the best_model.pth, should support string, maybe latter
             checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
             start_epoch = checkpoint['epoch']
             classifier.load_state_dict(checkpoint['model_state_dict'])
@@ -342,17 +332,20 @@ def main(args):
             eps=1e-08,
             weight_decay=args.decay_rate
         )
-    else:
+    elif args.optimizer == 'SGD':
         optimizer = torch.optim.SGD(classifier.parameters(), \
                                     lr=args.learning_rate, momentum=0.9,\
                                     weight_decay=args.decay_rate)
+    else:
+        raise NotImplementedError
 
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
     # Use MultiStepLR as in paper, decay by 10 at [120, 160]
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[120, 160], gamma=0.1)
 
-    # DEBUG: for scannet, now using the cosine anneal
+    # FIXME:  for scannet, now using the cosine anneal
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epoch, eta_min=0.0)
+
     global_epoch = 0
     global_step = 0
     if "scannet" in args.dataset:
@@ -378,6 +371,7 @@ def main(args):
         # when eval only, skip the traininig part
 
         if not args.eval_only:
+            '''The main training-loop'''
             for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
                 if not args.use_voxel:
                     if "modelnet" in args.dataset:
@@ -420,7 +414,8 @@ def main(args):
 
                 optimizer.zero_grad()
 
-                # TODO: save the intermediate results
+                '''save the intermediate attention map''''
+                # WANINIG: DISABLED FOR NOW!!!
                 SAVE_INTERVAL = 50
                 NUM_PER_EPOCH = 1
 
@@ -453,7 +448,6 @@ def main(args):
                 optimizer.step()
                 global_step += 1
 
-                # TODO: add accuracy for seg case ck
                 if "scannet" in args.dataset:
                     pred_choice = torch.argmax(pred, dim=2).cpu().numpy()  # B,N
                     target = target.cpu().numpy()
@@ -469,7 +463,7 @@ def main(args):
 
             '''TEST'''
             if not "scannet" in args.dataset:
-                # DEBUG: Temporarily disable eval for scannet for now, just test at last
+                # WARNING: Temporarily disable eval for scannet for now, just test at last
                 if (epoch+1) % 20 == 0:
                     with torch.no_grad():
                         returned_metric = test(classifier.eval(), testDataLoader, num_class=num_class, log_string=log_string)
@@ -517,13 +511,6 @@ def main(args):
                             }
                             torch.save(state, savepath)
 
-        '''the eval only mode'''
-        # if args.dataset == 'scannet' and args.eval_only:
-        # DEBUG: the final test of the scannet
-        # if args.dataset == 'scannet':
-            # args.mode = 'eval'
-            # test_scannet(args, classifier.eval(), final_test_loader, log_string)
-
         global_epoch += 1
 
     # final save of the model
@@ -539,11 +526,10 @@ def main(args):
     torch.save(state, savepath)
 
 
+    # for the scannet dataset, test at last
     if args.dataset == 'scannet':
         args.mode = 'eval'
         test_scannet(args, classifier.eval(), final_test_loader, log_string)
-
-
 
     logger.info('End of training...')
 

@@ -93,6 +93,7 @@ class get_model(nn.Module):
         input_points = self.input_mlp(inputs)
 
         if instance is not None:
+            # only apply instance information in the first 2 block
             l0_points, attn_0 = self.PTBlock0(l0_xyz, input_points, instance)
             l1_xyz, l1_points, l1_xyz_local, l1_points_local, l1_instance = self.TDLayer1(l0_xyz, l0_points, instance)
             l1_points, attn_1 = self.PTBlock1(l1_xyz, l1_points, l1_instance)
@@ -128,18 +129,21 @@ class get_model(nn.Module):
 
         x = self.fc(l8_points.transpose(1,2))
 
-        # if self.save_flag:
-            # self.save_dict['attn_0'].append(attn_0)
-            # self.save_dict['attn_1'].append(attn_1)
-            # self.save_dict['attn_2'].append(attn_2)
-            # self.save_dict['attn_3'].append(attn_3)
-            # self.save_dict['attn_4'].append(attn_4)
+        '''
+        # Temporarily disable the save intermediate here
+        if self.save_flag:
+            self.save_dict['attn_0'].append(attn_0)
+            self.save_dict['attn_1'].append(attn_1)
+            self.save_dict['attn_2'].append(attn_2)
+            self.save_dict['attn_3'].append(attn_3)
+            self.save_dict['attn_4'].append(attn_4)
 
-        # del attn_0
-        # del attn_1
-        # del attn_2
-        # del attn_3
-        # del attn_4
+        del attn_0
+        del attn_1
+        del attn_2
+        del attn_3
+        del attn_4
+        '''
 
         # l4_points = l4_points.mean(dim=-1)
 
