@@ -346,6 +346,15 @@ class PTBlock(nn.Module):
         input_x: B, in_dim, npoint
         '''
 
+
+        '''
+        how to use the instance information:
+        1. use it as guidance of the attention, mask the knns points with different instance label
+        2. directly random choose points of same instance label as attention receptive field
+        3. attend to the instance center
+        '''
+        INSTANCE_SCHEME = 3
+
         B, in_dim, npoint = list(input_x.size())
         n_sample = self.n_sample
         k = min(n_sample, npoint)
@@ -355,67 +364,118 @@ class PTBlock(nn.Module):
 
         input_p = input_p.permute([0,2,1])
 
+
+        if instance is not None and INSTANCE_SCHEME == 1:
+            # knn more points for sampling
+            knn_sample_more_ratio = 2
+            enlarged_k = k*knn_sample_more_ratio
+            self.knn = KNN(k=enlarged_k, transpose_mode=True)
+        else:
+            self.knn = KNN(k=k, transpose_mode=True)
+
         # DEBUG: error here is that in the last block only 4-points;
         # however the knn still gives 16 idxs
-        if npoint < self.n_sample:
-            self.knn = KNN(k=npoint, transpose_mode=True)
+        # so when n-point is smaller than the k(n_smaple)
+        # if npoint < self.n_sample:
+            # self.knn = KNN(k=npoint, transpose_mode=True) 
+        # else:
+            # self.knn = KNN(k=n_sample, transpose_mode=True)
+            # pass # regular case
+
 
         # DEBUG ONLY: using the input_x: feature space knn!
         # _, idx = self.knn(input_x.transpose(1,2), input_x.transpose(1,2))
 
+        if INSTANCE_SCHEME == 3:
+            '''
+            Ver3.0: use cur instance center as knn center,
+            calc the instance center, and weighting the cur-idx and the instance center idx
+            ERROR:
+                - all points of the same instance will have the same idxes? and all are cloest N points to centroid
+                - if use weiighted center and coord, However, need to do N-pointx KNN, will be slow...
+            '''
+            if instance is not None:
+                # where = torch.where(instance[0] == 1)
+                # instance_xyz = input_p[:,where,:].mean(dim=1)   # get [bs, 3] centroid for cur instance
+                import ipdb; ipdb.set_trace()
+
         _, idx = self.knn(input_p.contiguous(), input_p)
         idx = idx.int()
 
+        if INSTANCE_SCHEME == 1:
+            '''
+            Ver1.0(Naive Version): mask the knn(instance label as auxiliary filter)
+            older version of the instance mask
+            directly ck if knn grouped point within the same pointset
+            then mask if not in
+            '''
 
-        '''
-        # Ver1.0: mask the knn(instance label as auxiliary filter)
-        # older version of the instance mask
-        # directly ck if knn grouped point within the same pointset
-        # then mask if not in
+            if instance is not None:
+                # print('start processing the instance mask')
+                masks = []
+                for i_bs, idx_cur_bs in enumerate(idx):
+                    # [4096, 16] cur_bs_idx
+                    # [4096]: instance_label[i_bs]
+                    mask = instance[i_bs][idx_cur_bs.long()] # [4096, 2*k]
+                    mask = mask - mask[:,0].unsqueeze(-1) # get the 1st column(the 1st element in k-elements is itself)
+                    mask = (mask == 0).int() # acuiqre the 0-1 mask
+                    masks.append(mask)
+                masks = torch.stack(masks)
+                print("mask ratio {:.4f}".format(masks.sum() / masks.nelement())) # >0.5 means ok
 
-        if instance is not None:
-            print('start processing the instance mask')
-            masks = []
-            for i_bs, idx_cur_bs in enumerate(idx):
-                # [4096, 16] cur_bs_idx
-                # [4096]: instance_label[i_bs]
-                mask = instance[i_bs][idx_cur_bs.long()] # [4096, 16]
-                mask = mask - mask[:,0].unsqueeze(-1) # get the 1st column(the 1st element in k-elements is itself)
-                mask = (mask == 0).int() # acuiqre the 0-1 mask
-                masks.append(mask)
-            masks = torch.stack(masks)
-        print('cur kayer: the ratio is: {}'.format(masks.sum() / masks.nelement()))
-        '''
+                '''
+                generate bigger knn-idx and mask, then choose the 1st n_sample(16) elements
+                random sample other points from the latter, and use mask to fill into the 0 ones
 
-        '''
-        # Ver2.0: directly use the points of the same instance label as neighbors
-        # random sample k points in the same instance
-        '''
-        if instance is not None:
-            instance_relations = []
-            for i_bs in range(instance.shape[0]):
-                instance_inds = [torch.where(instance[i_bs] == v)[0] for v in torch.unique(instance[i_bs])] # torch.where returns a tuple, so use [0] to getthe tensor
-                instance_relation = torch.full([instance[0].shape[0], k], -1).to(instance.device)
-                for i, ins_id in enumerate(instance_inds):
-                    # TODO; stupid pytorch has no func like random.choice 
-                    if len(ins_id) <= 5: # for small outlier points, skip em
-                        continue
-                    try:
-                        perms = torch.multinomial(ins_id.repeat(len(ins_id),1).float(), num_samples=min(k, len(ins_id)), replacement=False)
-                    except RuntimeError:
-                        import ipdb; ipdb.set_trace()
-                    choices = ins_id[perms]
-                    instance_relation[instance_inds[i],:choices.shape[1]] = choices
-                instance_relation[:,0] = torch.arange(instance_relation.shape[0])
-                instance_relations.append(instance_relation)
-            instance_relations = torch.stack(instance_relations)
+                get the 1st k idxes that is not 0 in mask
+                since the mask values are all 0-1, use argsort will return a vector
+                however, we want smaller idxes in the front
+                so we give 0 elments a large value to make it appears at last
+                if use descend=True, biggest idx with 1 will come first
+                '''
 
-            print('replacing the instance_relation')
-            instance_relation_nonzero_mask = (instance_relations>=0).int()
-            instance_relation_zero_mask = (instance_relations<0).int()
+                inv_masks = (masks == 0).int()
+                tmp_inds = torch.arange(masks.shape[2]).repeat(masks.shape[0],masks.shape[1],1).to(idx.device) # generate the [1,2,...,enlarged_k] inds
+                tmp_inds = tmp_inds*masks
+                tmp_inds = tmp_inds + (masks.shape[2]+1)*inv_masks # fill the places of 0 with value bigger than the maximum value
+                tmp_inds = torch.argsort(tmp_inds)[:,:,:k]  # after argsort, the former elements should be non-zero value with smaller idx
+                idx = torch.gather(idx, -1, tmp_inds)
+                idx = idx.int()
 
-            idx = idx*instance_relation_zero_mask + instance_relations*instance_relation_nonzero_mask
-            idx = idx.int()
+                # TODO: if nk still does not contain enough elements, the argsort will contain the closet knn result while not instance
+
+
+        elif INSTANCE_SCHEME == 2:
+
+            '''
+            # Ver2.0: directly use the points of the same instance label as neighbors
+            # random sample k points in the same instance
+            '''
+            if instance is not None:
+                instance_relations = []
+                for i_bs in range(instance.shape[0]):
+                    instance_inds = [torch.where(instance[i_bs] == v)[0] for v in torch.unique(instance[i_bs])] # torch.where returns a tuple, so use [0] to getthe tensor
+                    instance_relation = torch.full([instance[0].shape[0], k], -1).to(instance.device)
+                    for i, ins_id in enumerate(instance_inds):
+                        # TODO; stupid pytorch has no func like random.choice 
+                        if len(ins_id) <= 5: # for small outlier points, skip em
+                            continue
+                        try:
+                            perms = torch.multinomial(ins_id.repeat(len(ins_id),1).float(), num_samples=min(k, len(ins_id)), replacement=False)
+                        except RuntimeError:
+                            import ipdb; ipdb.set_trace()
+                        choices = ins_id[perms]
+                        instance_relation[instance_inds[i],:choices.shape[1]] = choices
+                    instance_relation[:,0] = torch.arange(instance_relation.shape[0])
+                    instance_relations.append(instance_relation)
+                instance_relations = torch.stack(instance_relations)
+
+                # print('replacing the instance_relation')
+                instance_relation_nonzero_mask = (instance_relations>=0).int()
+                instance_relation_zero_mask = (instance_relations<0).int()
+
+                idx = idx*instance_relation_zero_mask + instance_relations*instance_relation_nonzero_mask
+                idx = idx.int()
 
         # ===================== Deprecated Methods ===========================1
 
@@ -530,8 +590,6 @@ class PTBlock(nn.Module):
             phi = phi.reshape(B, h, self.out_dim//h, npoint, k)
             psi = psi.reshape(B, h, self.out_dim//h, npoint, k)
             attn_map = F.softmax((phi*psi).reshape(B, self.out_dim, npoint, k) + pos_encoding, dim=-1)
-            # if instance is not None: # apply mask
-                # attn_map = attn_map*(masks.unsqueeze(1))
             y = attn_map*(alpha+pos_encoding)
             y = y.sum(dim=-1)
 

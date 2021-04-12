@@ -97,7 +97,7 @@ def write_to_file(path, probs):
     log_string(' -- save file to ====>'+file_name)
 
 
-def test_scannet(args, model, dst_loader, log_string):
+def test_scannet(args, model, dst_loader, log_string, with_instance=False):
     '''
     :param pn_list: sn (list => int), the number of points in a scene
     :param scene_list: sn (list => str), scene id
@@ -123,12 +123,22 @@ def test_scannet(args, model, dst_loader, log_string):
         vote_num = np.zeros((point_num, 1), dtype=np.int) # pn,1
         for idx, batch_data in enumerate(dst_loader):
             log_string('batch {}'.format(idx))
-            pc, seg, smpw, pidx= batch_data
+            if with_instance:
+                pc, seg, ins, smpw, pidx= batch_data
+                ins = ins.cuda()
+                seg = seg.cuda()
+            else:
+                pc, seg, smpw, pidx= batch_data
             if pidx.max() > point_num:
                 import ipdb; ipdb.set_trace()
             pc = pc.cuda().float()
             pc = pc.transpose(1,2)
-            pred = model(pc) # B,N,C
+            if with_instance:
+                # DEBUG: Use target as instance for now
+                # pred = model(pc, instance=seg) # B,N,C
+                pred = model(pc, instance=ins) # B,N,C
+            else:
+                pred = model(pc) # B,N,C
             pred = torch.nn.functional.softmax(pred, dim=2)
 
             pred = pred.cpu().detach().numpy()

@@ -36,7 +36,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'model'))
 
-# torch.cuda.set_device(0)
 # torch.backends.cudnn.enabled=False
 
 def setup_seed(seed):
@@ -187,7 +186,8 @@ def main(args):
     experiment_dir.mkdir(exist_ok=True)
     checkpoints_dir = experiment_dir.joinpath('checkpoints/')
     checkpoints_dir.mkdir(exist_ok=True)
-    log_dir = experiment_dir.joinpath('logs/')
+    # log_dir = experiment_dir.joinpath('logs/')
+    log_dir = experiment_dir.joinpath('./')
     log_dir.mkdir(exist_ok=True)
 
     '''LOG'''
@@ -275,7 +275,7 @@ def main(args):
             trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
         # FIXME: actually, we donot eval the scannet during training, for its too slow, so only the final_test is applied at the end of the training to acquire mIOU
         testset = ScannetDatasetWholeScene(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='eval')
-        final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True)
+        final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True, with_instance=args.with_instance)
 
         # DEBUG: when using more num_workers, could cause error, doesnot know why, havenot tested afterwards
         testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
@@ -286,9 +286,11 @@ def main(args):
 
     '''MODEL LOADING'''
     # copy files
+    if not os.path.exists(os.path.join(str(experiment_dir),'model')):
+        os.mkdir(os.path.join(str(experiment_dir),'model'))
     for filename in os.listdir('./model'):
         if ".py" in filename:
-            shutil.copy(os.path.join("./model", filename), str(experiment_dir))
+            shutil.copy(os.path.join("./model", filename), os.path.join(str(experiment_dir),'model'))
     shutil.copy("./train_cls.py", str(experiment_dir))
 
     if "mink" not in args.model:
@@ -414,7 +416,7 @@ def main(args):
 
                 optimizer.zero_grad()
 
-                '''save the intermediate attention map''''
+                '''save the intermediate attention map'''
                 # WANINIG: DISABLED FOR NOW!!!
                 SAVE_INTERVAL = 50
                 NUM_PER_EPOCH = 1
@@ -438,6 +440,8 @@ def main(args):
                 # when with-instance, use instance label to guide the point-transformer training
                 if args.with_instance:
                     pred = classifier(points, instance)
+                    # DEBUG: use labels as instance to guide
+                    # pred = classifier(points, target)
                 else:
                     pred = classifier(points)
                 if 'scannet' in args.dataset:
@@ -515,10 +519,10 @@ def main(args):
 
     # final save of the model
     logger.info('Save model...')
-    savepath = str(checkpoints_dir) + '/best_model.pth'
+    savepath = str(checkpoints_dir) + '/final_model.pth'
     log_string('Saving at %s'% savepath)
     state = {
-        # 'epoch': best_epoch,
+        'epoch': global_epoch,
         # 'mIoU': mIoU,
         'model_state_dict': classifier.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -529,8 +533,22 @@ def main(args):
     # for the scannet dataset, test at last
     if args.dataset == 'scannet':
         args.mode = 'eval'
-        test_scannet(args, classifier.eval(), final_test_loader, log_string)
+        test_scannet(args, classifier.eval(), final_test_loader, log_string, with_instance=args.with_instance)
 
+    # final save of the model
+    logger.info('Save model...')
+    savepath = str(checkpoints_dir) + '/best_model.pth'
+    log_string('Saving at %s'% savepath)
+    state = {
+        'epoch': global_epoch,
+        # 'mIoU': mIoU,
+        'model_state_dict': classifier.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    torch.save(state, savepath)
+
+
+    
     logger.info('End of training...')
 
 if __name__ == '__main__':
