@@ -97,7 +97,7 @@ def write_to_file(path, probs):
     log_string(' -- save file to ====>'+file_name)
 
 
-def test_scannet(args, model, dst_loader, log_string, with_instance=False):
+def test_scannet(args, model, dst_loader, log_string, with_aux=False, save_dir=None, split='eval'):
     '''
     :param pn_list: sn (list => int), the number of points in a scene
     :param scene_list: sn (list => str), scene id
@@ -113,6 +113,10 @@ def test_scannet(args, model, dst_loader, log_string, with_instance=False):
     total_correct_class = [0] * NUM_CLASSES
     total_iou_deno_class = [0] * NUM_CLASSES
 
+    if save_dir is not None:
+        save_dict = {}
+        save_dict['pred'] = []
+
     scene_num = len(scene_list)
     for scene_index in range(scene_num):
         log_string(' ======= {}/{} ======= '.format(scene_index, scene_num))
@@ -123,9 +127,9 @@ def test_scannet(args, model, dst_loader, log_string, with_instance=False):
         vote_num = np.zeros((point_num, 1), dtype=np.int) # pn,1
         for idx, batch_data in enumerate(dst_loader):
             log_string('batch {}'.format(idx))
-            if with_instance:
-                pc, seg, ins, smpw, pidx= batch_data
-                ins = ins.cuda()
+            if with_aux:
+                pc, seg, aux, smpw, pidx= batch_data
+                aux = aux.cuda()
                 seg = seg.cuda()
             else:
                 pc, seg, smpw, pidx= batch_data
@@ -133,10 +137,9 @@ def test_scannet(args, model, dst_loader, log_string, with_instance=False):
                 import ipdb; ipdb.set_trace()
             pc = pc.cuda().float()
             pc = pc.transpose(1,2)
-            if with_instance:
+            if with_aux:
                 # DEBUG: Use target as instance for now
-                # pred = model(pc, instance=seg) # B,N,C
-                pred = model(pc, instance=ins) # B,N,C
+                pred = model(pc, instance=aux) # B,N,C
             else:
                 pred = model(pc) # B,N,C
             pred = torch.nn.functional.softmax(pred, dim=2)
@@ -145,34 +148,44 @@ def test_scannet(args, model, dst_loader, log_string, with_instance=False):
             pidx = pidx.numpy() # B,N
             predict, vote_num = vote(predict, vote_num, pred, pidx)
 
-
         predict = predict / vote_num
+
+        if save_dir is not None:
+            if np.isnan(predict).any():
+                print("found nan in scene{}".format(scene_id))
+                import ipdb; ipdb.set_trace()
+            save_dict['pred'].append(np.argmax(predict, axis=-1))
+
+
         # if args.log_dir is not None:
             # if not os.path.exists(args.log_dir):
                 # os.makedirs(args.log_dir)
             # save_path = os.path.join(args.log_dir, '{}'.format(scene_id))
             # write_to_file(save_path, predict)
 
-        if args.mode != 'test':
-            predict = np.argmax(predict[:, 1:], axis=1) # pn
-            predict += 1
-            labels = SEM_LABELS[scene_index]
-            total_seen += np.sum(labels > 0) # point_num
-            total_correct += np.sum((predict == labels) & (labels > 0))
-            log_string('accuracy:{} '.format(total_correct / total_seen))
-            for l in range(NUM_CLASSES):
-                total_seen_class[l] += np.sum((labels == l) & (labels > 0))
-                total_correct_class[l] += np.sum((predict == l) & (labels == l))
-                total_iou_deno_class[l] += np.sum(((predict == l) & (labels > 0)) | (labels == l))
+        predict = np.argmax(predict[:, 1:], axis=1) # pn
+        predict += 1
+        labels = SEM_LABELS[scene_index]
+        total_seen += np.sum(labels > 0) # point_num
+        total_correct += np.sum((predict == labels) & (labels > 0))
+        log_string('accuracy:{} '.format(total_correct / total_seen))
+        for l in range(NUM_CLASSES):
+            total_seen_class[l] += np.sum((labels == l) & (labels > 0))
+            total_correct_class[l] += np.sum((predict == l) & (labels == l))
+            total_iou_deno_class[l] += np.sum(((predict == l) & (labels > 0)) | (labels == l))
 
-    if args.mode != 'test':
-        IoU = np.array(total_correct_class[1:])/(np.array(total_iou_deno_class[1:],dtype=np.float)+1e-6)
-        log_string('eval point avg class IoU: %f' % (np.mean(IoU)))
-        IoU_Class = 'Each Class IoU:::\n'
-        for i in range(IoU.shape[0]):
-            log_string('Class %d : %.4f'%(i+1, IoU[i]))
-        log_string('eval accuracy: %f'% (total_correct / float(total_seen)))
-        log_string('eval avg class acc: %f' % (np.mean(np.array(total_correct_class[1:])/(np.array(total_seen_class[1:],dtype=np.float)+1e-6))))
+    # final save
+    if save_dir is not None:
+        torch.save(save_dict, os.path.join(save_dir,'{}_pred.pth'.format(split)))
+
+
+    IoU = np.array(total_correct_class[1:])/(np.array(total_iou_deno_class[1:],dtype=np.float)+1e-6)
+    log_string('eval point avg class IoU: %f' % (np.mean(IoU)))
+    IoU_Class = 'Each Class IoU:::\n'
+    for i in range(IoU.shape[0]):
+        log_string('Class %d : %.4f'%(i+1, IoU[i]))
+    log_string('eval accuracy: %f'% (total_correct / float(total_seen)))
+    log_string('eval avg class acc: %f' % (np.mean(np.array(total_correct_class[1:])/(np.array(total_seen_class[1:],dtype=np.float)+1e-6))))
 
 
 if __name__ == '__main__':

@@ -353,7 +353,7 @@ class PTBlock(nn.Module):
         2. directly random choose points of same instance label as attention receptive field
         3. attend to the instance center
         '''
-        INSTANCE_SCHEME = 3
+        INSTANCE_SCHEME = 1
 
         B, in_dim, npoint = list(input_x.size())
         n_sample = self.n_sample
@@ -363,6 +363,7 @@ class PTBlock(nn.Module):
         res = input_x
 
         input_p = input_p.permute([0,2,1])
+        ori_input_p = input_p
 
 
         if instance is not None and INSTANCE_SCHEME == 1:
@@ -386,20 +387,37 @@ class PTBlock(nn.Module):
         # DEBUG ONLY: using the input_x: feature space knn!
         # _, idx = self.knn(input_x.transpose(1,2), input_x.transpose(1,2))
 
-        if INSTANCE_SCHEME == 3:
-            '''
-            Ver3.0: use cur instance center as knn center,
-            calc the instance center, and weighting the cur-idx and the instance center idx
-            ERROR:
-                - all points of the same instance will have the same idxes? and all are cloest N points to centroid
-                - if use weiighted center and coord, However, need to do N-pointx KNN, will be slow...
-            '''
-            if instance is not None:
+
+        if instance is not None:
+
+            if INSTANCE_SCHEME == 3:
+                '''
+                Ver3.0: use cur instance center as knn center,
+                calc the instance center, and weighting the cur-idx and the instance center idx
+                ERROR:
+                    - all points of the same instance will have the same idxes? and all are cloest N points to centroid
+                    - if use weiighted center and coord, However, need to do N-pointx KNN, will be slow...
+                '''
+                ori_input_p = input_p.clone()
                 # where = torch.where(instance[0] == 1)
                 # instance_xyz = input_p[:,where,:].mean(dim=1)   # get [bs, 3] centroid for cur instance
-                import ipdb; ipdb.set_trace()
+                for i_bs in range(instance.shape[0]):
+                    for v in torch.unique(instance[i_bs]):
+                        tmp_idx = torch.where(instance[i_bs] == v)[0]
+                        ins_center = input_p[:, tmp_idx, :].mean(dim=1) # the centroids for each intsance
+                        # average cur point and the instance center
+                        alpha = 0.9995
+                        input_p[:,tmp_idx,:] = alpha*input_p[:,tmp_idx,:] + (1-alpha)*ins_center.unsqueeze(1) # [bs, n_cur_ins, 3] + [bs, 1, 3]
 
-        _, idx = self.knn(input_p.contiguous(), input_p)
+
+                _, idx = self.knn(ori_input_p.contiguous(), ori_input_p)
+                _, idx2 = self.knn(ori_input_p.contiguous(), input_p)
+                print( (idx == idx2).int().sum() / idx.nelement())
+            else:
+                _, idx = self.knn(input_p.contiguous(), input_p)
+        else:
+            _, idx = self.knn(input_p.contiguous(), input_p)
+
         idx = idx.int()
 
         if INSTANCE_SCHEME == 1:

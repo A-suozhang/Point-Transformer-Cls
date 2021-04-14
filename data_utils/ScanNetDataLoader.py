@@ -7,7 +7,7 @@ import torch.utils.data as torch_data
 from torch.utils.data import DataLoader
 
 class ScannetDataset(torch_data.Dataset):
-    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, with_instance=False,sample_rate=None):
+    def __init__(self, root=None, npoints=10240, split='train', with_dropout=False, with_norm=True, with_rgb=True, with_seg=False, with_instance=False, with_pred=False,sample_rate=None):
         super().__init__()
         print(' ---- load data from', root)
         self.npoints = npoints
@@ -16,7 +16,11 @@ class ScannetDataset(torch_data.Dataset):
         self.indices = [0, 1, 2]
         if with_norm: self.indices += [3, 4, 5]
         if with_rgb: self.indices += [6, 7, 8]
-        self.with_instance = with_instance
+
+
+        # assert only 1 of the with_instance/pred/seg is True
+        assert sum([with_instance, with_seg, with_pred is not None]) <= 1
+        self.with_aux = with_instance or with_seg or with_pred is not None
 
         print('load scannet dataset <{}> with npoint {}, indices: {}.'.format(split, npoints, self.indices))
 
@@ -33,8 +37,16 @@ class ScannetDataset(torch_data.Dataset):
         data_dict = torch.load(data_filename)
         self.scene_points_list = data_dict['data']
         self.semantic_labels_list = data_dict['label']
-        if self.with_instance:
-            self.instance_label_list = data_dict['instance']
+        if self.with_aux:
+            if with_instance:
+                self.instance_label_list = data_dict['instance']
+            elif with_seg:
+                self.instance_label_list = data_dict['label']
+            elif with_pred:
+                self.instance_label_list = torch.load(os.path.join(with_pred, "{}_pred.pth".format(split)))['pred']
+        else:
+            pass
+
         #scene_points_id = pickle.load(fp)
         num_point_all = data_dict['npoints']
 
@@ -75,7 +87,7 @@ class ScannetDataset(torch_data.Dataset):
         index = self.room_idxs[index]
         data_set = self.scene_points_list[index]
         point_set = data_set[:, :3]
-        if self.with_instance:
+        if self.with_aux:
             instance_set = self.instance_label_list[index]
         semantic_seg = self.semantic_labels_list[index].astype(np.int32)
         coordmax = np.max(point_set, axis=0)
@@ -95,7 +107,7 @@ class ScannetDataset(torch_data.Dataset):
             curchoice = np.sum((point_set >= (curmin - 0.2)) * (point_set <= (curmax + 0.2)), axis=1) == 3
             cur_point_set = point_set[curchoice, :]
             cur_data_set = data_set[curchoice, :]
-            if self.with_instance:
+            if self.with_aux:
                 try:
                     cur_instance_set = instance_set[curchoice]
                 except IndexError:
@@ -112,7 +124,7 @@ class ScannetDataset(torch_data.Dataset):
 
         choice = np.random.choice(len(cur_semantic_seg), self.npoints, replace=True)
         semantic_seg = cur_semantic_seg[choice]
-        if self.with_instance:
+        if self.with_aux:
             instance_seg = cur_instance_set[choice]
         mask = mask[choice]
         sample_weight = self.labelweights[semantic_seg]
@@ -147,7 +159,7 @@ class ScannetDataset(torch_data.Dataset):
             # instance_relations[:,0] = np.arange(instance_relations.shape[0])
             # instance_relations = instance_relations.astype(int)
 
-        if self.with_instance:
+        if self.with_aux:
             return point_set, semantic_seg, sample_weight, instance_seg
         else:
             return point_set, semantic_seg, sample_weight
@@ -262,19 +274,21 @@ class ScannetDatasetWholeScene(torch_data.IterableDataset):
 
 class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
     #prepare to give prediction on each points
-    def __init__(self, root=None, scene_list_dir=None, split='test', num_class=21, block_points=81932, with_norm=True, with_rgb=True, with_instance=False, \
-                 delta=1.0):
+    def __init__(self, root=None, scene_list_dir=None, split='test', num_class=21, block_points=81932, with_norm=True, with_rgb=True, with_seg=False,with_instance=False, \
+                 with_pred=None, delta=1.0):
         super().__init__()
         print(' ---- load data from', root)
         self.block_points = block_points
         self.indices = [0, 1, 2]
         if with_norm: self.indices += [3, 4, 5]
         if with_rgb: self.indices += [6, 7, 8]
-        self.with_instance = with_instance
+
+        assert sum([with_instance, with_seg, with_pred is not None]) <= 1
+        self.with_aux = with_instance or with_seg or with_pred is not None
+
         print('load scannet <TEST> dataset <{}> with npoint {}, indices: {}.'.format(split, block_points, self.indices))
 
         self.delta = delta
-        
         self.point_num = []
         self.temp_data = []
         self.temp_index = 0
@@ -294,8 +308,16 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
         data_dict = torch.load(data_filename)
         self.scene_points_list = data_dict['data']
         self.semantic_labels_list = data_dict['label']
-        if self.with_instance:
-            self.instance_label_list = data_dict['instance']
+        # give the aux supervision, packed in self.instance_label_list
+        if self.with_aux:
+            if with_instance:
+                self.instance_label_list = data_dict['instance']
+            elif with_seg:
+                self.instance_label_list = data_dict['label']
+            elif with_pred:
+                self.instance_label_list = torch.load(os.path.join(with_pred, "{}_pred.pth".format(split)))['pred']
+        else:
+            pass
         self.scene_points_num = data_dict['npoints']
 
         file_path = os.path.join(scene_list_dir, 'scannetv2_{}.txt'.format(split))
@@ -358,7 +380,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
         # else:
         #     point_set_ini = self.scene_points_list[index][:, 0:3]
         semantic_seg_ini = self.semantic_labels_list[index].astype(np.int32)
-        if self.with_instance:
+        if self.with_aux:
             instance_seg_ini = self.instance_label_list[index].astype(np.int32)
         coordmax = np.max(point_set_ini[:, 0:3],axis=0)
         coordmin = np.min(point_set_ini[:, 0:3],axis=0)
@@ -366,7 +388,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
         nsubvolume_y = np.ceil((coordmax[1]-coordmin[1])/delta).astype(np.int32)
         point_sets = []
         semantic_segs = []
-        if self.with_instance:
+        if self.with_aux:
             instance_segs = []
         sample_weights = []
         point_idxs = []
@@ -379,7 +401,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
                 curchoice_idx = np.where(curchoice)[0]
                 cur_point_set = point_set_ini[curchoice,:]
                 cur_semantic_seg = semantic_seg_ini[curchoice]
-                if self.with_instance:
+                if self.with_aux:
                     cur_instance_seg = instance_seg_ini[curchoice]
                 if len(cur_semantic_seg)==0:
                     continue
@@ -388,7 +410,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
                 sample_weight *= mask # N
                 point_sets.append(cur_point_set) # 1xNx3/6
                 semantic_segs.append(cur_semantic_seg) # 1xN
-                if self.with_instance:
+                if self.with_aux:
                     instance_segs.append(cur_instance_seg)
                 sample_weights.append(sample_weight) # 1xN
                 point_idxs.append(curchoice_idx) #1xN
@@ -404,13 +426,13 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
 
             small_block_data = point_sets[block_idx].copy()
             small_block_seg = semantic_segs[block_idx].copy()
-            if self.with_instance:
+            if self.with_aux:
                 small_block_instance = instance_segs[block_idx].copy()
             small_block_smpw = sample_weights[block_idx].copy()
             small_block_idxs = point_idxs[block_idx].copy()
             small_block_center = block_center[block_idx].copy()
             point_sets.pop(block_idx)
-            if self.with_instance:
+            if self.with_aux:
                 instance_segs.pop(block_idx)
             semantic_segs.pop(block_idx)
             sample_weights.pop(block_idx)
@@ -419,7 +441,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
             nearest_block_idx = self.nearest_dist(small_block_center, block_center)
             point_sets[nearest_block_idx] = np.concatenate((point_sets[nearest_block_idx], small_block_data), axis = 0)
             semantic_segs[nearest_block_idx] = np.concatenate((semantic_segs[nearest_block_idx], small_block_seg), axis = 0)
-            if self.with_instance:
+            if self.with_aux:
                 instance_segs[nearest_block_idx] = np.concatenate((instance_segs[nearest_block_idx], small_block_seg), axis = 0)
             sample_weights[nearest_block_idx] = np.concatenate((sample_weights[nearest_block_idx], small_block_smpw), axis = 0)
             point_idxs[nearest_block_idx] = np.concatenate((point_idxs[nearest_block_idx], small_block_idxs), axis = 0)
@@ -429,7 +451,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
         num_blocks = len(point_sets)
         div_blocks = []
         div_blocks_seg = []
-        if self.with_instance:
+        if self.with_aux:
             div_blocks_instance = []
         div_blocks_smpw = []
         div_blocks_idxs = []
@@ -452,7 +474,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
 
             div_blocks += self.split_data(point_sets[block_idx], sub_blocks)
             div_blocks_seg += self.split_data(semantic_segs[block_idx], sub_blocks)
-            if self.with_instance:
+            if self.with_aux:
                 div_blocks_instance += self.split_data(instance_segs[block_idx], sub_blocks)
             div_blocks_smpw += self.split_data(sample_weights[block_idx], sub_blocks)
             div_blocks_idxs += self.split_data(point_idxs[block_idx], sub_blocks)
@@ -467,7 +489,7 @@ class ScannetDatasetWholeScene_evaluation(torch_data.IterableDataset):
             point_set[:, 6:] = selected_points[:, 3:] / 255.0 # rgb
 
             point_set = point_set[:, self.indices]
-            if self.with_instance:
+            if self.with_aux:
                 self.temp_data.append((point_set, div_blocks_seg[i], div_blocks_instance[i], div_blocks_smpw[i], div_blocks_idxs[i]))
             else:
                 self.temp_data.append((point_set, div_blocks_seg[i], div_blocks_smpw[i], div_blocks_idxs[i]))

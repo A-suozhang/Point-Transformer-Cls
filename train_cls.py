@@ -53,10 +53,9 @@ def parse_args():
     parser.add_argument('--epoch',  default=200, type=int, help='number of epoch in training [default: 200]')
     parser.add_argument('--pretrain', action='store_true', default=False, help='whether to load a pretrained model [default: False]')
     parser.add_argument('--use_voxel', action='store_true', default=False, help='whether to use points or voxel')
-    parser.add_argument('--eval_only', action='store_true', default=False, help='whether eval only for debug')
     parser.add_argument('--voxel_size', type=float, default=0., help='the voxel size')
     parser.add_argument('--dataset', type=str, default='modelnet', help='define the dataset, could be [modelnet, modelnet_voxel, scanobjnn, scannet]')
-    # parser.add_argument('--mode', type=str, default='train', help='define modes, [train,eval_only,test])')
+    parser.add_argument('--mode', type=str, default='train', help='define modes, [train,eval,test,export])')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='learning rate in training [default: 0.001]')
     parser.add_argument('--gpu', type=str, default='0', help='specify gpu device [default: 0]')
     parser.add_argument('--num_point', type=int, default=1024, help='Point Number [default: 1024]')
@@ -65,7 +64,8 @@ def parse_args():
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='decay rate [default: 1e-4]')
     parser.add_argument('--normal', type=int, default=0, help='how many normal channels are aside from xyz')
     parser.add_argument('--num_worker', type=int, default=0, help='dataloader threads')
-    parser.add_argument('--with_instance', action='store_true', default=False, help='whether to use the instance information')
+    parser.add_argument('--aux', type=str, default=None, help='whether to use auxiliary information to guide training, should be in [instance, seg(label), preds]')
+    parser.add_argument('--pred_path', type=str, default=None, help='whether to use the prediction')
     parser.add_argument('--seed', type=int, default=2021, help= 'seed')
     return parser.parse_args()
 
@@ -208,8 +208,33 @@ def main(args):
         assert "mink" in args.model
         assert args.voxel_size > 0
 
-    if args.with_instance:
+
+
+    '''AUX SUPERVISION TYPE'''
+    if args.aux == "pred":
+        assert args.pred_path is not None
+
+    if args.pred_path is not None:
+        assert args.aux == "pred"
+
+    args.with_pred = None
+    args.with_instance = False
+    args.with_seg = False
+    if args.aux is not None:
+        args.with_aux = True
         assert "scannet" in args.dataset
+        if args.aux == "pred":
+            args.with_pred = args.pred_path
+        elif args.aux == "instance":
+            args.with_instance = True
+        elif args.aux == "seg":
+            args.with_seg = True
+        else:
+            raise NotImplementedError
+    else:
+        args.with_aux = False
+
+
 
     '''DATA LOADING'''
     if args.dataset == "modelnet":
@@ -269,29 +294,33 @@ def main(args):
         testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
     elif args.dataset == 'scannet':
         num_class = 21
-        if not args.eval_only:
-            trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_instance=args.with_instance)
-
+        if args.mode == "train":
+            trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path)
             trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
-        # FIXME: actually, we donot eval the scannet during training, for its too slow, so only the final_test is applied at the end of the training to acquire mIOU
-        testset = ScannetDatasetWholeScene(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='eval')
-        final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True, with_instance=args.with_instance)
+        if args.mode == 'export':
+            final_trainset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='train',block_points=args.num_point, with_rgb=True, with_norm=True,\
+                                                                 with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=2.0)
+            final_train_loader = torch.utils.data.DataLoader(final_trainset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
-        # DEBUG: when using more num_workers, could cause error, doesnot know why, havenot tested afterwards
-        testDataLoader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker, pin_memory=True)
+
+        final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True, \
+                                                            with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=1.0) # DEBUG: change to 1.0 to axquire proper
         final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
+        # generate the trainset as whole_dataset for export
+        
     else:
         raise NotImplementedError
 
     '''MODEL LOADING'''
     # copy files
-    if not os.path.exists(os.path.join(str(experiment_dir),'model')):
-        os.mkdir(os.path.join(str(experiment_dir),'model'))
-    for filename in os.listdir('./model'):
-        if ".py" in filename:
-            shutil.copy(os.path.join("./model", filename), os.path.join(str(experiment_dir),'model'))
-    shutil.copy("./train_cls.py", str(experiment_dir))
+    if args.mode == "train":
+        if not os.path.exists(os.path.join(str(experiment_dir),'model')):
+            os.mkdir(os.path.join(str(experiment_dir),'model'))
+        for filename in os.listdir('./model'):
+            if ".py" in filename:
+                shutil.copy(os.path.join("./model", filename), os.path.join(str(experiment_dir),'model'))
+        shutil.copy("./train_cls.py", str(experiment_dir))
 
     if "mink" not in args.model:
         # no use mink-net
@@ -358,7 +387,7 @@ def main(args):
     mean_correct = []
 
     # only run for one epoch on the eval-only mode
-    if args.eval_only:
+    if args.mode == "eval" or args.mode == "export":
         assert args.pretrain
         start_epoch = 0
         args.epoch = 1
@@ -372,7 +401,7 @@ def main(args):
         log_string('Cur LR: {:.5f}'.format(optimizer.param_groups[0]['lr']))
         # when eval only, skip the traininig part
 
-        if not args.eval_only:
+        if args.mode == "train":
             '''The main training-loop'''
             for batch_id, data in tqdm(enumerate(trainDataLoader, 0), total=len(trainDataLoader), smoothing=0.9):
                 if not args.use_voxel:
@@ -401,9 +430,9 @@ def main(args):
                     elif "scannet" in args.dataset:
                         # TODO: fiil the scannet loading here
                         # TODO: maybe implement the grad-accmu/or simply not
-                        if args.with_instance:
-                            points, target, sample_weight, instance = data
-                            points, target, sample_weight, instance = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda(), instance.cuda()
+                        if args.aux is not None:
+                            points, target, sample_weight, aux = data
+                            points, target, sample_weight, aux = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda(), aux.cuda()
                         else:
                             points, target, sample_weight = data
                             points, target, sample_weight = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda()
@@ -438,10 +467,8 @@ def main(args):
 
                 classifier = classifier.train()
                 # when with-instance, use instance label to guide the point-transformer training
-                if args.with_instance:
-                    pred = classifier(points, instance)
-                    # DEBUG: use labels as instance to guide
-                    # pred = classifier(points, target)
+                if args.aux is not None:
+                    pred = classifier(points, aux)
                 else:
                     pred = classifier(points)
                 if 'scannet' in args.dataset:
@@ -532,8 +559,13 @@ def main(args):
 
     # for the scannet dataset, test at last
     if args.dataset == 'scannet':
-        args.mode = 'eval'
-        test_scannet(args, classifier.eval(), final_test_loader, log_string, with_instance=args.with_instance)
+        if not os.path.exists(os.path.join(str(experiment_dir),'pred')):
+            os.mkdir(os.path.join(str(experiment_dir),'pred'))
+        if args.mode == "export":
+            test_scannet(args, classifier.eval(), final_test_loader, log_string, with_aux=args.with_aux, save_dir=os.path.join(str(experiment_dir),'pred'), split='eval')
+            test_scannet(args, classifier.eval(), final_train_loader, log_string, with_aux=args.with_aux, save_dir=os.path.join(str(experiment_dir),'pred'), split='train')
+        else:
+            test_scannet(args, classifier.eval(), final_test_loader, log_string, with_aux=args.with_aux, split='eval')
 
     # final save of the model
     logger.info('Save model...')
@@ -548,7 +580,6 @@ def main(args):
     torch.save(state, savepath)
 
 
-    
     logger.info('End of training...')
 
 if __name__ == '__main__':
