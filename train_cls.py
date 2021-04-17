@@ -15,6 +15,7 @@ from test_scannet import test_scannet
 # really dirty import, should fix later
 from model.mink_resnets import *
 from model.mink_pointnet import *
+from model.mink_transformer import *
 
 from torchvision import transforms
 import argparse
@@ -31,6 +32,8 @@ import importlib
 import shutil
 import random
 
+sys.path.append('/home/zhaotianchen/project/point-transformer/pt-cls/data_utils/voxel_scannet')
+from ScanNetVoxel import *
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -237,51 +240,61 @@ def main(args):
 
 
     '''DATA LOADING'''
-    if args.dataset == "modelnet":
-        log_string('Load dataset {}'.format(args.dataset))
-        num_class = 40
-        DATA_PATH = './data/modelnet40_normal_resampled/'
-        TRAIN_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='train',
-                                                         normal_channel=args.normal, apply_aug=True)
-        TEST_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='test',
-                                                        normal_channel=args.normal)
+    if "modelnet" in args.dataset:
+        '''
+        the modelnet 40 loading, support both the point & ME-point Ver.
+        '''
+        if not "voxel" in args.dataset:
+            log_string('Load dataset {}'.format(args.dataset))
+            num_class = 40
+            DATA_PATH = './data/modelnet40_normal_resampled/'
+            TRAIN_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='train',
+                                                             normal_channel=args.normal, apply_aug=True)
+            TEST_DATASET = ModelNetDataLoader(root=DATA_PATH, npoint=args.num_point, split='test',
+                                                            normal_channel=args.normal)
 
-        trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker)
-        testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+            trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker)
+            testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
+        else:
+            assert args.dataset == 'modelnet_voxel'
+            '''
+            use the modelnet example dataloader from the ME-engine
+            however, it seems still is point-based, retrun point features，
+            and feed in the TenesorField, not really the voxel-modelnet
+            '''
+            log_string('Load dataset {}'.format(args.dataset))
+            num_class = 40
+            DATA_PATH = './data/modelnet40_ply_hdf5_2048'
 
-    elif args.dataset == "modelnet_voxel":
-        log_string('Load dataset {}'.format(args.dataset))
-        num_class = 40
-        DATA_PATH = './data/modelnet40_ply_hdf5_2048'
+            trainset = ModelNet40H5(
+                phase = "train",
+                transform=CoordinateTransformation(trans=0.2),
+                data_root = DATA_PATH,
+            )
+            testset = ModelNet40H5(
+                phase = "test",
+                transform=None,  # no transform for test
+                data_root = DATA_PATH,
+            )
 
-        trainset = ModelNet40H5(
-            phase = "train",
-            transform=CoordinateTransformation(trans=0.2),
-            data_root = DATA_PATH,
-        )
-        testset = ModelNet40H5(
-            phase = "test",
-            transform=None,  # no transform for test
-            data_root = DATA_PATH,
-        )
+            trainDataLoader = DataLoader(
+                trainset,
+                num_workers=args.num_worker,
+                shuffle=True,
+                batch_size=args.batch_size,
+                collate_fn = minkowski_collate_fn,
+                pin_memory=True,
+            )
 
-        trainDataLoader = DataLoader(
-            trainset,
-            num_workers=args.num_worker,
-            shuffle=True,
-            batch_size=args.batch_size,
-            collate_fn = minkowski_collate_fn,
-            pin_memory=True,
-        )
+            testDataLoader = DataLoader(
+                testset,
+                num_workers=args.num_worker,
+                shuffle=False,
+                batch_size=args.batch_size,
+                collate_fn = minkowski_collate_fn,
+                pin_memory=True,
+            )
 
-        testDataLoader = DataLoader(
-            testset,
-            num_workers=args.num_worker,
-            shuffle=False,
-            batch_size=args.batch_size,
-            collate_fn = minkowski_collate_fn,
-            pin_memory=True,
-        )
     elif args.dataset == "scanobjnn":
         log_string('Load dataset {}'.format(args.dataset))
         num_class = 15
@@ -292,23 +305,39 @@ def main(args):
                                                         normal_channel=args.normal)
         trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker)
         testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=args.num_worker)
-    elif args.dataset == 'scannet':
+
+    elif "scannet" in args.dataset:
         num_class = 21
-        if args.mode == "train":
-            trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path)
-            trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
-        if args.mode == 'export':
-            final_trainset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='train',block_points=args.num_point, with_rgb=True, with_norm=True,\
-                                                                 with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=2.0)
-            final_train_loader = torch.utils.data.DataLoader(final_trainset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+        if not "voxel" in args.dataset:
+            if args.mode == "train":
+                trainset = ScannetDataset(root='./data/scannet_v2/scannet_pickles', npoints=args.num_point, split='train', with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path)
+                trainDataLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker, pin_memory=True)
+            if args.mode == 'export':
+                final_trainset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='train',block_points=args.num_point, with_rgb=True, with_norm=True,\
+                                                                     with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=2.0)
+                final_train_loader = torch.utils.data.DataLoader(final_trainset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
 
-        final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True, \
-                                                            with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=1.0) # DEBUG: change to 1.0 to axquire proper
-        final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+            final_testset = ScannetDatasetWholeScene_evaluation(root='./data/scannet_v2/scannet_pickles', scene_list_dir='./data/scannet_v2/metadata',split='eval',block_points=args.num_point, with_rgb=True, with_norm=True, \
+                                                                with_seg=args.with_seg, with_instance=args.with_instance, with_pred=args.pred_path, delta=1.0) # DEBUG: change to 1.0 to axquire proper
+            final_test_loader = torch.utils.data.DataLoader(final_testset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
-        # generate the trainset as whole_dataset for export
-        
+            # generate the trainset as whole_dataset for export
+        else:
+            trainDataLoader = initialize_data_loader(
+                    DatasetClass=ScannetSparseVoxelizationDataset,
+                    data_root='data/scannet_v2/scannet_pickles',
+                    phase="train",
+                    threads=4, # num-workers
+                    shuffle=True,
+                    repeat=False,
+                    augment_data=True,
+                    batch_size=16,
+                    limit_numpoints=1200000,
+                )
+
+            # TODO: the testloader
+
     else:
         raise NotImplementedError
 
@@ -333,12 +362,19 @@ def main(args):
         criterion = MODEL.get_loss().cuda()
         classifier.loss = criterion
     else:
-        # TODO: when using normal?
+        '''
+        The Voxel-based Networks based on the MinkowskiEngine
+        '''
+        # TODO: should align with above, using importlib.import_module, maybe fix later
         # classifier = ResNet14(in_channels=3, out_channels=num_class, D=3)  # D is the conv spatial dimension, 3 menas 3-d shapes
-        classifier = MinkowskiPointNet(in_channel=3, out_channel=41, embedding_channel=1024,dimension=3).cuda()
+        if "pointnet" in args.model:
+            classifier = MinkowskiPointNet(in_channel=3, out_channel=41, embedding_channel=1024,dimension=3).cuda()
+        elif "trans" in args.model:
+            classifier = MinkowskiTransformer(in_channel=3, out_channel=41, num_class=num_class, embedding_channel=1024, dimension=3).cuda()
         criterion = nn.CrossEntropyLoss().cuda()
         classifier.loss = criterion
-    
+
+
     '''Loading existing ckpt'''
     try:
         if args.pretrain:
@@ -438,10 +474,15 @@ def main(args):
                             points, target, sample_weight = points.float().transpose(1,2).cuda(), target.cuda(), sample_weight.cuda()
 
                 else:
-                    # use voxel
-                    # points = create_input_batch(data, True, 'cuda', quantization_size=args.voxel_size) 
-                    points = ME.TensorField(coordinates=data['coordinates'].cuda(), features=data['features'].cuda())
-                    target = data['labels'].cuda()
+                    if "modelnet" in args.dataset:
+                        # use voxel
+                        # points = create_input_batch(data, True, 'cuda', quantization_size=args.voxel_size) 
+                        data['coordinates'][:,1:] = data['coordinates'][:,1:]/args.voxel_size
+                        points = ME.TensorField(coordinates=(data['coordinates'].cuda()), features=data['features'].cuda())
+                        target = data['labels'].cuda()
+                    elif "scannet" in args.dataset:
+                        dat = ME.SparseTensor(features=data[1],coordinates=data[0]).cuda()
+                        target = data[2].cuda()
 
                 optimizer.zero_grad()
 
@@ -471,6 +512,9 @@ def main(args):
                     pred = classifier(points, aux)
                 else:
                     pred = classifier(points)
+                # if use_voxel, get the feature from the SparseTensor
+                if args.use_voxel:
+                    pred = pred.F
                 if 'scannet' in args.dataset:
                     loss = criterion(pred, target.long(), sample_weight)
                 else:

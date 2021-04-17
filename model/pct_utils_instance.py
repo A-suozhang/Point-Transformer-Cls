@@ -353,7 +353,7 @@ class PTBlock(nn.Module):
         2. directly random choose points of same instance label as attention receptive field
         3. attend to the instance center
         '''
-        INSTANCE_SCHEME = 1
+        INSTANCE_SCHEME = 3
 
         B, in_dim, npoint = list(input_x.size())
         n_sample = self.n_sample
@@ -406,7 +406,7 @@ class PTBlock(nn.Module):
                         tmp_idx = torch.where(instance[i_bs] == v)[0]
                         ins_center = input_p[:, tmp_idx, :].mean(dim=1) # the centroids for each intsance
                         # average cur point and the instance center
-                        alpha = 0.9995
+                        alpha = 0.999
                         input_p[:,tmp_idx,:] = alpha*input_p[:,tmp_idx,:] + (1-alpha)*ins_center.unsqueeze(1) # [bs, n_cur_ins, 3] + [bs, 1, 3]
 
 
